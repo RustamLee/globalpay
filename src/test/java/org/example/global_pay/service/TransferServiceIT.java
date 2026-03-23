@@ -1,22 +1,34 @@
 package org.example.global_pay.service;
 
+import lombok.extern.slf4j.Slf4j;
 import org.example.global_pay.domain.Account;
+import org.example.global_pay.domain.Transaction;
+import org.example.global_pay.domain.TransactionStatus;
 import org.example.global_pay.domain.User;
 import org.example.global_pay.exception.CurrencyMismatchException;
 import org.example.global_pay.exception.InsufficientFundsException;
 import org.example.global_pay.exception.SelfTransferException;
 import org.example.global_pay.repository.AccountRepository;
+import org.example.global_pay.repository.TransactionRepository;
 import org.example.global_pay.repository.UserRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -25,10 +37,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@Slf4j
 @SpringBootTest
-@Transactional
 @ActiveProfiles("test")
+@Testcontainers
+@Transactional
 public class TransferServiceIT {
+
+    @Container
+    @ServiceConnection // Эта аннотация САМА пропишет URL, user и password для Spring Data
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15-alpine");
+
     @Autowired
     private TransferService transferService;
 
@@ -37,6 +56,9 @@ public class TransferServiceIT {
 
     @Autowired
     private UserRepository userRepository;
+
+    @Autowired
+    private TransactionRepository transactionRepository;
 
     @Test
     @DisplayName("Should transfer money between accounts")
@@ -65,13 +87,15 @@ public class TransferServiceIT {
         transferService.transfer(from.getId(), to.getId(), new BigDecimal("30.00"));
 
         // THEN: The first account should have $70 and the second account should have $80
-
         Account fromAccount = accountRepository.findById(from.getId()).orElseThrow();
         Account toAccount = accountRepository.findById(to.getId()).orElseThrow();
 
-        assertEquals(new BigDecimal("70.00"), fromAccount.getBalance());
-        assertEquals(new BigDecimal("80.00"), toAccount.getBalance());
+        assertThat(fromAccount.getBalance()).isEqualByComparingTo("70.00");
+        assertThat(toAccount.getBalance()).isEqualByComparingTo("80.00");
 
+        List<Transaction> transactions = transactionRepository.findAll();
+        assertThat(transactions).hasSize(1);
+        assertThat(transactions.getFirst().getStatus()).isEqualTo(TransactionStatus.SUCCESS);
     }
 
     @Test
@@ -166,7 +190,7 @@ public class TransferServiceIT {
                     successCount.incrementAndGet();
                 } catch (Exception e) {
                     failureCount.incrementAndGet();
-                    System.err.println("Conflict: " + e.getClass().getSimpleName());
+                    log.error("Conflict during transfer: ", e);
                 } finally {
                     finishLatch.countDown();
                 }
@@ -179,7 +203,8 @@ public class TransferServiceIT {
 
         Account from = accountRepository.findById(fromId).orElseThrow();
         Account to = accountRepository.findById(toId).orElseThrow();
-        System.out.println("Success: " + successCount.get() + ", Failures: " + failureCount.get());
+        log.info("Final balances - From: {}, To: {}", from.getBalance(), to.getBalance());
+        log.info("Failure count: {}", failureCount.get());
 
         assertEquals(0, new BigDecimal("1000.00").compareTo(from.getBalance().add(to.getBalance())), "Money lost/created!");
 
@@ -192,6 +217,7 @@ public class TransferServiceIT {
 
     @AfterEach
     void cleanDbAfter() {
+        transactionRepository.deleteAll();
         accountRepository.deleteAll();
         userRepository.deleteAll();
     }

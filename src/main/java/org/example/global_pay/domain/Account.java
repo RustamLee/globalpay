@@ -32,7 +32,7 @@ public class Account {
             throw new IllegalArgumentException("Amount must be positive");
         }
         if (this.balance.compareTo(amount) < 0) {
-            throw new InsufficientFundsException("Not enough balance" + id);
+            throw new InsufficientFundsException("Not enough balance for account ID: " + id);
         }
         this.balance = this.balance.subtract(amount);
     }

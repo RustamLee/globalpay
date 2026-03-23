@@ -3,7 +3,6 @@ spring:
     name: globalpay
 
   datasource:
-    # Адрес твоего контейнера из docker-compose
     url: jdbc:postgresql://localhost:5432/globalpay
     username: devuser
     password: devpassword
@@ -11,14 +10,21 @@ spring:
 
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
-    show-sql: true # Будем видеть в консоли все запросы к базе
+    show-sql: true
     hibernate:
-      ddl-auto: validate # Мы не даем Hibernate менять таблицы, это сделает Flyway
+      ddl-auto: validate
     properties:
       hibernate:
         format_sql: true
 
-  # Настройки Flyway для миграций
+
   flyway:
     enabled: true
     baseline-on-migrate: true
+
+logging:
+  level:
+    root: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
