@@ -22,6 +22,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -322,5 +324,61 @@ public class TransferServiceIT {
         assertThat(count).isEqualTo(1);
     }
 
+    @Test
+    @DisplayName("Should return paginated transaction history for account")
+    void shouldReturnHistory() {
+
+        // GIVEN
+        User user3 = userRepository.save(User.builder().id(UUID.randomUUID()).email("test3@mail.com").build());
+        User user4 = userRepository.save(User.builder().id(UUID.randomUUID()).email("test4@mail.com").build());
+
+        UUID fromId = UUID.randomUUID();
+        UUID toId = UUID.randomUUID();
+
+        Account from = Account.builder()
+                .id(fromId)
+                .userId(user3.getId())
+                .balance(new BigDecimal("100.00"))
+                .currency("USD")
+                .build();
+        Account to = Account.builder()
+                .id(toId)
+                .userId(user4.getId())
+                .balance(new BigDecimal("50.00"))
+                .currency("USD")
+                .build();
+
+        accountRepository.save(from);
+        accountRepository.save(to);
+
+        TransferRequest request1 = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("10.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
+        TransferRequest request2 = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("15.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+        TransferRequest request3 = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("5.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
+        //WHEN
+        transferService.transfer(request1);
+        transferService.transfer(request2);
+        transferService.transfer(request3);
+
+        // THEN
+        Page<Transaction> history = transferService.getTransactions(fromId, PageRequest.of(0, 10));        // THEN
+        assertThat(history.getContent()).hasSize(3);
+    }
 
 }

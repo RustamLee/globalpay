@@ -9,10 +9,14 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.MediaType;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -350,5 +354,15 @@ public class TransferControllerTest {
                 .andExpect(jsonPath("$.message").value("Duplicate request detected"));
     }
 
+    @Test
+    @DisplayName("Should return 200 OK and paginated history")
+    void shouldReturnHistory() throws Exception {
+        UUID accountId = UUID.randomUUID();
+        when(transferService.getTransactions(eq(accountId), any(Pageable.class)))
+                .thenReturn(Page.empty());
+
+        mockMvc.perform(get("/api/v1/transfer/accounts/{accountId}/transactions", accountId))
+                .andExpect(status().isOk());
+    }
 
 }

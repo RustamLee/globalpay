@@ -12,9 +12,11 @@ import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.SelfTransferException;
 import org.example.global_pay.repository.AccountRepository;
 import org.example.global_pay.repository.TransactionRepository;
+import org.springframework.data.domain.Page;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.data.domain.Pageable;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -97,5 +99,7 @@ public class TransferService {
         transactionRepository.save(transaction);
     }
 
-
+    public Page<Transaction> getTransactions(UUID accountId, Pageable pageable) {
+        return transactionRepository.findAllByFromAccountIdOrToAccountIdOrderByCreatedAtDesc(accountId, accountId, pageable);
+    }
 }
