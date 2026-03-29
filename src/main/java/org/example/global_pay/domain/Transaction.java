@@ -39,4 +39,7 @@ public class Transaction {
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;
+
+    @Column(name = "idempotency_key", unique = true)
+    private UUID idempotencyKey;
 }

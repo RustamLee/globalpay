@@ -3,10 +3,7 @@ package org.example.global_pay.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.global_pay.domain.Account;
 import org.example.global_pay.dto.TransferRequest;
-import org.example.global_pay.exception.AccountNotFoundException;
-import org.example.global_pay.exception.CurrencyMismatchException;
-import org.example.global_pay.exception.InsufficientFundsException;
-import org.example.global_pay.exception.SelfTransferException;
+import org.example.global_pay.exception.*;
 import org.example.global_pay.service.TransferService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -44,8 +41,8 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
-        ;
 
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -53,7 +50,7 @@ public class TransferControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string("Transfer successful"));
 
-        verify(transferService).transfer(eq(request.getFromId()), eq(request.getToId()), eq(request.getAmount()));
+        verify(transferService).transfer(request);
     }
 
     @Test
@@ -63,6 +60,7 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("-50.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         mockMvc.perform(post("/api/v1/transfer")
@@ -80,10 +78,11 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("1000.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         doThrow(new InsufficientFundsException("Insufficient funds"))
-                .when(transferService).transfer(any(), any(), any());
+                .when(transferService).transfer(any(TransferRequest.class));
 
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -91,7 +90,7 @@ public class TransferControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.message").value("Insufficient funds"))
                 .andExpect(jsonPath("$.error").value("Business Logic Error"));
-        verify(transferService).transfer(eq(request.getFromId()), eq(request.getToId()), eq(request.getAmount()));
+        verify(transferService).transfer(request);
     }
 
     @Test
@@ -100,6 +99,7 @@ public class TransferControllerTest {
         TransferRequest request = TransferRequest.builder()
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         mockMvc.perform(post("/api/v1/transfer")
@@ -118,6 +118,7 @@ public class TransferControllerTest {
         TransferRequest request = TransferRequest.builder()
                 .fromId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         mockMvc.perform(post("/api/v1/transfer")
@@ -139,10 +140,11 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         doThrow(new AccountNotFoundException("Account not found"))
-                .when(transferService).transfer(any(), any(), any());
+                .when(transferService).transfer(any(TransferRequest.class));
 
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -150,7 +152,7 @@ public class TransferControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("Business Logic Error"))
                 .andExpect(jsonPath("$.message").value("Account not found"));
-        verify(transferService).transfer(any(), any(), any());
+        verify(transferService).transfer(any(TransferRequest.class));
     }
 
     @Test
@@ -159,6 +161,7 @@ public class TransferControllerTest {
         TransferRequest request = TransferRequest.builder()
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         mockMvc.perform(post("/api/v1/transfer")
@@ -178,10 +181,11 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         doThrow(new CurrencyMismatchException("Currency mismatch between accounts"))
-                .when(transferService).transfer(any(), any(), any());
+                .when(transferService).transfer(any(TransferRequest.class));
 
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -190,7 +194,7 @@ public class TransferControllerTest {
                 .andExpect(jsonPath("$.error").value("Business Logic Error"))
                 .andExpect(jsonPath("$.message").value("Currency mismatch between accounts"));
 
-        verify(transferService).transfer(eq(request.getFromId()), eq(request.getToId()), eq(request.getAmount()));
+        verify(transferService).transfer(request);
 
     }
 
@@ -202,10 +206,11 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         doThrow(new ObjectOptimisticLockingFailureException(Account.class, request.getFromId()))
-                .when(transferService).transfer(any(), any(), any());
+                .when(transferService).transfer(any(TransferRequest.class));
 
         // WHEN & THEN
         mockMvc.perform(post("/api/v1/transfer")
@@ -215,7 +220,7 @@ public class TransferControllerTest {
                 .andExpect(jsonPath("$.error").value("Concurrency Conflict"))
                 .andExpect(jsonPath("$.status").value(409));
 
-        verify(transferService).transfer(any(), any(), any());
+        verify(transferService).transfer(any(TransferRequest.class));
     }
 
     @Test
@@ -226,10 +231,11 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         doThrow(new RuntimeException("Database connection lost!"))
-                .when(transferService).transfer(any(), any(), any());
+                .when(transferService).transfer(any(TransferRequest.class));
 
         //WHEN & THEN
         mockMvc.perform(post("/api/v1/transfer")
@@ -271,6 +277,7 @@ public class TransferControllerTest {
                 .fromId(UUID.randomUUID())
                 .toId(UUID.randomUUID())
                 .amount(new BigDecimal("0.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         mockMvc.perform(post("/api/v1/transfer")
@@ -306,10 +313,11 @@ public class TransferControllerTest {
                 .fromId(accountId)
                 .toId(accountId)
                 .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
                 .build();
 
         doThrow(new SelfTransferException("Cannot transfer to the same account"))
-                .when(transferService).transfer(any(), any(), any());
+                .when(transferService).transfer(any(TransferRequest.class));
 
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -318,7 +326,28 @@ public class TransferControllerTest {
                 .andExpect(jsonPath("$.error").value("Business Logic Error"))
                 .andExpect(jsonPath("$.message").value("Cannot transfer to the same account"));
 
-        verify(transferService).transfer(eq(request.getFromId()), eq(request.getToId()), eq(request.getAmount()));
+        verify(transferService).transfer(request);
+    }
+
+
+    @Test
+    @DisplayName("Should return 409 Conflict when idempotency key is already used")
+    void shouldReturn409ForDuplicateRequest() throws Exception {
+        TransferRequest request = TransferRequest.builder()
+                .fromId(UUID.randomUUID())
+                .toId(UUID.randomUUID())
+                .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
+        doThrow(new DuplicateRequestException("Duplicate request detected"))
+                .when(transferService).transfer(any(TransferRequest.class));
+
+        mockMvc.perform(post("/api/v1/transfer")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isConflict()) // Проверяем 409
+                .andExpect(jsonPath("$.message").value("Duplicate request detected"));
     }
 
 

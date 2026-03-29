@@ -2,24 +2,27 @@ package org.example.global_pay.service;
 
 import org.example.global_pay.domain.Account;
 import org.example.global_pay.domain.Transaction;
-import org.example.global_pay.exception.AccountNotFoundException;
-import org.example.global_pay.exception.CurrencyMismatchException;
-import org.example.global_pay.exception.InsufficientFundsException;
-import org.example.global_pay.exception.SelfTransferException;
+import org.example.global_pay.domain.TransactionStatus;
+import org.example.global_pay.dto.TransferRequest;
+import org.example.global_pay.exception.*;
 import org.example.global_pay.repository.AccountRepository;
 import org.example.global_pay.repository.TransactionRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.*;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -33,6 +36,17 @@ public class TransferServiceTest {
 
     @InjectMocks
     private TransferService transferService;
+
+    @Mock
+    private StringRedisTemplate redisTemplate;
+
+    @Mock
+    private ValueOperations<String, String> valueOps;
+
+    @BeforeEach
+    void setUpRedis() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+    }
 
 
     @Test
@@ -54,20 +68,32 @@ public class TransferServiceTest {
                 .currency("USD")
                 .build();
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .idempotencyKey(UUID.randomUUID())
+                .amount(amount)
+                .build();
+
         when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
         when(accountRepository.findById(toId)).thenReturn(Optional.of(toAccount));
 
         // WHEN
-        transferService.transfer(fromId, toId, amount);
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
+        transferService.transfer(request);
 
-        // THEN
         assertThat(fromAccount.getBalance()).isEqualByComparingTo("100.00");
         assertThat(toAccount.getBalance()).isEqualByComparingTo("150.00");
 
 
         verify(accountRepository, times(1)).save(fromAccount);
         verify(accountRepository, times(1)).save(toAccount);
-        verify(transactionRepository, times(1)).save(any(Transaction.class));
+        verify(transactionRepository).save(argThat(t ->
+                t.getIdempotencyKey().equals(request.getIdempotencyKey()) &&
+                        t.getStatus() == TransactionStatus.SUCCESS
+        ));
+        verify(valueOps).set(anyString(), eq("COMPLETED"), any());
     }
 
     @Test
@@ -77,9 +103,17 @@ public class TransferServiceTest {
         UUID accountId = UUID.randomUUID();
         BigDecimal amount = new BigDecimal("100.00");
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(accountId)
+                .toId(accountId)
+                .amount(amount)
+                .build();
+
         // WHEN & THEN
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
         assertThrows(SelfTransferException.class, () -> {
-            transferService.transfer(accountId, accountId, amount);
+            transferService.transfer(request);
         });
 
         verify(accountRepository, never()).findById(any());
@@ -97,9 +131,17 @@ public class TransferServiceTest {
 
         when(accountRepository.findById(fromId)).thenReturn(Optional.empty());
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(amount)
+                .build();
+
         // WHEN & THEN
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
         assertThrows(AccountNotFoundException.class, () -> {
-            transferService.transfer(fromId, toId, amount);
+            transferService.transfer(request);
         });
 
         verify(accountRepository, times(1)).findById(fromId);
@@ -125,9 +167,17 @@ public class TransferServiceTest {
         when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
         when(accountRepository.findById(toId)).thenReturn(Optional.empty());
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(amount)
+                .build();
+
         // WHEN & THEN
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
         assertThrows(AccountNotFoundException.class, () -> {
-            transferService.transfer(fromId, toId, amount);
+            transferService.transfer(request);
         });
 
         verify(accountRepository, times(1)).findById(fromId);
@@ -158,9 +208,17 @@ public class TransferServiceTest {
         when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
         when(accountRepository.findById(toId)).thenReturn(Optional.of(toAccount));
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(amount)
+                .build();
+
         // WHEN & THEN
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
         assertThrows(CurrencyMismatchException.class, () -> {
-            transferService.transfer(fromId, toId, amount);
+            transferService.transfer(request);
         });
 
         verify(accountRepository, times(1)).findById(fromId);
@@ -191,9 +249,17 @@ public class TransferServiceTest {
         when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
         when(accountRepository.findById(toId)).thenReturn(Optional.of(toAccount));
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(amount)
+                .build();
+
         // WHEN & THEN
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(true);
         assertThrows(InsufficientFundsException.class, () -> {
-            transferService.transfer(fromId, toId, amount);
+            transferService.transfer(request);
         });
 
         verify(accountRepository, times(1)).findById(fromId);
@@ -202,5 +268,31 @@ public class TransferServiceTest {
         verifyNoInteractions(transactionRepository);
     }
 
+    @Test
+    @DisplayName("Should prevent duplicate transfers with same idempotency key")
+    void shouldPreventDuplicateTransfers() {
+        // GIVEN
+        UUID fromId = UUID.randomUUID();
+        UUID toId = UUID.randomUUID();
+        BigDecimal amount = new BigDecimal("100.00");
+
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .idempotencyKey(UUID.randomUUID())
+                .amount(amount)
+                .build();
+
+        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
+                .thenReturn(false);
+
+        // WHEN & THEN
+        assertThrows(DuplicateRequestException.class, () -> {
+            transferService.transfer(request);
+        });
+        verify(valueOps).setIfAbsent(anyString(), anyString(), any());
+        verifyNoInteractions(accountRepository);
+        verifyNoInteractions(transactionRepository);
+    }
 
 }

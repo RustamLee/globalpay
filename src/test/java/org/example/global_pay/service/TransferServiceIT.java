@@ -5,7 +5,9 @@ import org.example.global_pay.domain.Account;
 import org.example.global_pay.domain.Transaction;
 import org.example.global_pay.domain.TransactionStatus;
 import org.example.global_pay.domain.User;
+import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.CurrencyMismatchException;
+import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.InsufficientFundsException;
 import org.example.global_pay.exception.SelfTransferException;
 import org.example.global_pay.repository.AccountRepository;
@@ -20,9 +22,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -45,8 +52,18 @@ import static org.junit.jupiter.api.Assertions.*;
 public class TransferServiceIT {
 
     @Container
-    @ServiceConnection // Эта аннотация САМА пропишет URL, user и password для Spring Data
+    @ServiceConnection
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15-alpine");
+
+    @Container
+    @ServiceConnection
+    static GenericContainer<?> redis = new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
+
+    @DynamicPropertySource
+    static void redisProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.redis.host", redis::getHost);
+        registry.add("spring.redis.port", () -> redis.getMappedPort(6379));
+    }
 
     @Autowired
     private TransferService transferService;
@@ -60,6 +77,18 @@ public class TransferServiceIT {
     @Autowired
     private TransactionRepository transactionRepository;
 
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @AfterEach
+    void cleanDbAfter() {
+        transactionRepository.deleteAll();
+        accountRepository.deleteAll();
+        userRepository.deleteAll();
+        redisTemplate.getConnectionFactory().getConnection().serverCommands().flushAll();
+
+    }
+
     @Test
     @DisplayName("Should transfer money between accounts")
     void shouldTransferMoney() {
@@ -67,14 +96,17 @@ public class TransferServiceIT {
         User user1 = userRepository.save(User.builder().id(UUID.randomUUID()).email("est1@mail.com").build());
         User user2 = userRepository.save(User.builder().id(UUID.randomUUID()).email("test2@mail.com").build());
 
+        UUID fromId = UUID.randomUUID();
+        UUID toId = UUID.randomUUID();
+
         Account from = Account.builder()
-                .id(UUID.randomUUID())
+                .id(fromId)
                 .userId(user1.getId())
                 .balance(new BigDecimal("100.00"))
                 .currency("USD")
                 .build();
         Account to = Account.builder()
-                .id(UUID.randomUUID())
+                .id(toId)
                 .userId(user2.getId())
                 .balance(new BigDecimal("50.00"))
                 .currency("USD")
@@ -83,10 +115,17 @@ public class TransferServiceIT {
         accountRepository.save(from);
         accountRepository.save(to);
 
-        //WHEN: We transfer $30 from the first account to the second account
-        transferService.transfer(from.getId(), to.getId(), new BigDecimal("30.00"));
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("30.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
 
-        // THEN: The first account should have $70 and the second account should have $80
+        //WHEN:
+        transferService.transfer(request);
+
+        // THEN:
         Account fromAccount = accountRepository.findById(from.getId()).orElseThrow();
         Account toAccount = accountRepository.findById(to.getId()).orElseThrow();
 
@@ -112,9 +151,16 @@ public class TransferServiceIT {
                 .version(null)
                 .build());
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(accountId)
+                .toId(accountId)
+                .amount(new BigDecimal("10.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
         // WHEN & THEN
         assertThrows(SelfTransferException.class, () -> {
-            transferService.transfer(accountId, accountId, new BigDecimal("10.00"));
+            transferService.transfer(request);
         });
     }
 
@@ -122,19 +168,28 @@ public class TransferServiceIT {
     @DisplayName("Should throw InsufficientFundsException when source account has insufficient funds")
     void shouldThrowExceptionWhenInsufficientFunds() {
         // GIVEN
-        User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sendler@test.com").build());
-        User receiver = userRepository.save(User.builder().id(UUID.randomUUID()).email("receiver@test.com").build());
+
         UUID fromId = UUID.randomUUID();
         UUID toId = UUID.randomUUID();
+
+        User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sendler@test.com").build());
+        User receiver = userRepository.save(User.builder().id(UUID.randomUUID()).email("receiver@test.com").build());
 
         accountRepository.save(Account.builder()
                 .id(fromId).userId(sender.getId()).balance(new BigDecimal("10.00")).currency("USD").version(null).build());
         accountRepository.save(Account.builder()
                 .id(toId).userId(receiver.getId()).balance(new BigDecimal("50.00")).currency("USD").version(null).build());
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
         // WHEN & THEN
         assertThrows(InsufficientFundsException.class, () -> {
-            transferService.transfer(fromId, toId, new BigDecimal("100.00"));
+            transferService.transfer(request);
         });
     }
 
@@ -147,6 +202,13 @@ public class TransferServiceIT {
         UUID fromId = UUID.randomUUID();
         UUID toId = UUID.randomUUID();
 
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("5.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
         accountRepository.save(Account.builder()
                 .id(fromId).userId(sender.getId()).balance(new BigDecimal("10.00")).currency("BRL").version(null).build());
         accountRepository.save(Account.builder()
@@ -154,7 +216,7 @@ public class TransferServiceIT {
 
         // WHEN & THEN
         assertThrows(CurrencyMismatchException.class, () -> {
-            transferService.transfer(fromId, toId, new BigDecimal("5.00"));
+            transferService.transfer(request);
         });
     }
 
@@ -181,12 +243,19 @@ public class TransferServiceIT {
         AtomicInteger successCount = new AtomicInteger();
         AtomicInteger failureCount = new AtomicInteger();
 
-        // WHEN: We start two threads that try to transfer $80 from the same account at the same time
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("10.00"))
+                .idempotencyKey(UUID.randomUUID())
+                .build();
+
+        // WHEN:
         for (int i = 0; i < threadsCount; i++) {
             executor.submit(() -> {
                 try {
-                    startLatch.await(); // Wait for the signal to start
-                    transferService.transfer(fromId, toId, new BigDecimal("10.00"));
+                    startLatch.await();
+                    transferService.transfer(request);
                     successCount.incrementAndGet();
                 } catch (Exception e) {
                     failureCount.incrementAndGet();
@@ -197,8 +266,8 @@ public class TransferServiceIT {
             });
         }
 
-        startLatch.countDown(); // Signal all threads to start
-        finishLatch.await(); // Wait for all threads to finish
+        startLatch.countDown();
+        finishLatch.await();
         executor.shutdown();
 
         Account from = accountRepository.findById(fromId).orElseThrow();
@@ -208,18 +277,50 @@ public class TransferServiceIT {
 
         assertEquals(0, new BigDecimal("1000.00").compareTo(from.getBalance().add(to.getBalance())), "Money lost/created!");
 
-        // Проверка 2: Никто не ушел в минус
         assertTrue(from.getBalance().compareTo(BigDecimal.ZERO) >= 0, "Negative balance!");
 
-        // Проверка 3: Были хоть какие-то конфликты (иначе тест не про конкурентность)
         assertTrue(failureCount.get() > 0, "No race conditions happened - test is too weak!");
     }
 
-    @AfterEach
-    void cleanDbAfter() {
-        transactionRepository.deleteAll();
-        accountRepository.deleteAll();
-        userRepository.deleteAll();
+    @Test
+    @DisplayName("Should process transfer only once for the same idempotency key in real Redis")
+    void shouldHandleIdempotencyRealLife() {
+        // GIVEN:
+        UUID fromId = UUID.randomUUID();
+        UUID toId = UUID.randomUUID();
+        UUID key = UUID.randomUUID();
+
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("20.00"))
+                .idempotencyKey(key)
+                .build();
+
+        User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sendler@test.com").build());
+        User receiver = userRepository.save(User.builder().id(UUID.randomUUID()).email("receiver@test.com").build());
+
+        accountRepository.save(Account.builder()
+                .id(fromId).userId(sender.getId()).balance(new BigDecimal("100.00")).currency("USD").build());
+        accountRepository.save(Account.builder()
+                .id(toId).userId(receiver.getId()).balance(new BigDecimal("50.00")).currency("USD").build());
+
+        // WHEN:
+        transferService.transfer(request);
+
+        // THEN:
+        assertThrows(DuplicateRequestException.class, () -> {
+            transferService.transfer(request);
+        });
+
+        Account from = accountRepository.findById(fromId).orElseThrow();
+        assertThat(from.getBalance()).isEqualByComparingTo("80.00"); // 100 - 20
+
+        long count = transactionRepository.findAll().stream()
+                .filter(t -> t.getIdempotencyKey().equals(key))
+                .count();
+        assertThat(count).isEqualTo(1);
     }
+
 
 }

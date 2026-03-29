@@ -21,8 +21,8 @@ public class TransferController {
     @PostMapping
     public ResponseEntity<String> transfer(@Valid @RequestBody TransferRequest request) {
         log.info("Transfer request to transfer {} from account {} to account {}", request.getAmount(), request.getFromId(), request.getToId());
-        transferService.transfer(request.getFromId(), request.getToId(), request.getAmount());
-
+        transferService.transfer(request);
+        log.info("Transfer successful for request from {}", request.getFromId());
         return ResponseEntity.ok("Transfer successful");
     }
 

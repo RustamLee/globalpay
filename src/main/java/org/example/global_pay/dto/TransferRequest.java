@@ -27,4 +27,6 @@ public class TransferRequest {
     @Positive(message = "Amount must be greater than zero")
     private BigDecimal amount;
 
+    @NotNull(message = "Idempotency key is required")
+    private UUID idempotencyKey;
 }
