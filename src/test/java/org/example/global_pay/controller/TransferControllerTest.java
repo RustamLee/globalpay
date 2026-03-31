@@ -153,8 +153,8 @@ public class TransferControllerTest {
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("Business Logic Error"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("Not Found"))
                 .andExpect(jsonPath("$.message").value("Account not found"));
         verify(transferService).transfer(any(TransferRequest.class));
     }

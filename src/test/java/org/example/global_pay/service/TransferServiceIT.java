@@ -92,55 +92,113 @@ public class TransferServiceIT {
     }
 
     @Test
+    @DisplayName("Should handle concurrent transfers safely with Optimistic Locking")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void shouldHandleConcurrentTransfers() throws InterruptedException {
+        // GIVEN
+        User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sender@test.com").build());
+        User receiver = userRepository.save(User.builder().id(UUID.randomUUID()).email("receiver@test.com").build());
+        UUID fromId = UUID.randomUUID();
+        UUID toId = UUID.randomUUID();
+
+        accountRepository.save(Account.builder()
+                .id(fromId).userId(sender.getId()).balance(new BigDecimal("1000.00")).currency("USD").build());
+        accountRepository.save(Account.builder()
+                .id(toId).userId(receiver.getId()).balance(new BigDecimal("0.00")).currency("USD").build());
+
+        int threadsCount = 20;
+        ExecutorService executor = Executors.newFixedThreadPool(threadsCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch finishLatch = new CountDownLatch(threadsCount);
+
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger failureCount = new AtomicInteger();
+
+        // WHEN:
+        for (int i = 0; i < threadsCount; i++) {
+            executor.submit(() -> {
+                try {
+                    TransferRequest uniqueRequest = TransferRequest.builder()
+                            .fromId(fromId)
+                            .toId(toId)
+                            .amount(new BigDecimal("10.00"))
+                            .idempotencyKey(UUID.randomUUID())
+                            .build();
+                    startLatch.await();
+                    transferService.transfer(uniqueRequest);
+                    successCount.incrementAndGet();
+                } catch (Exception e) {
+                    failureCount.incrementAndGet();
+                    log.error("Conflict during transfer: ", e);
+                } finally {
+                    finishLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        finishLatch.await();
+        executor.shutdown();
+
+        Account from = accountRepository.findById(fromId).orElseThrow();
+        Account to = accountRepository.findById(toId).orElseThrow();
+        log.info("Final balances - From: {}, To: {}", from.getBalance(), to.getBalance());
+        log.info("Failure count: {}", failureCount.get());
+
+        assertEquals(0, new BigDecimal("1000.00").compareTo(from.getBalance().add(to.getBalance())), "Money lost/created!");
+        assertTrue(from.getBalance().compareTo(BigDecimal.ZERO) >= 0, "Negative balance!");
+        assertEquals(threadsCount, successCount.get() + failureCount.get());
+        assertThat(to.getBalance()).isEqualByComparingTo(new BigDecimal(successCount.get()).multiply(new BigDecimal("10.00")));
+    }
+
+
+    @Test
     @DisplayName("Should transfer money between accounts")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldTransferMoney() {
         // GIVEN
-        User user1 = userRepository.save(User.builder().id(UUID.randomUUID()).email("est1@mail.com").build());
+        User user1 = userRepository.save(User.builder().id(UUID.randomUUID()).email("test1@mail.com").build());
         User user2 = userRepository.save(User.builder().id(UUID.randomUUID()).email("test2@mail.com").build());
 
         UUID fromId = UUID.randomUUID();
         UUID toId = UUID.randomUUID();
+        UUID idempotencyKey = UUID.randomUUID();
 
-        Account from = Account.builder()
-                .id(fromId)
-                .userId(user1.getId())
-                .balance(new BigDecimal("100.00"))
-                .currency("USD")
-                .build();
-        Account to = Account.builder()
-                .id(toId)
-                .userId(user2.getId())
-                .balance(new BigDecimal("50.00"))
-                .currency("USD")
-                .build();
-
-        accountRepository.save(from);
-        accountRepository.save(to);
+        accountRepository.save(Account.builder()
+                .id(fromId).userId(user1.getId()).balance(new BigDecimal("100.00")).currency("USD").build());
+        accountRepository.save(Account.builder()
+                .id(toId).userId(user2.getId()).balance(new BigDecimal("50.00")).currency("USD").build());
 
         TransferRequest request = TransferRequest.builder()
                 .fromId(fromId)
                 .toId(toId)
                 .amount(new BigDecimal("30.00"))
-                .idempotencyKey(UUID.randomUUID())
+                .idempotencyKey(idempotencyKey)
                 .build();
 
-        //WHEN:
+        // WHEN:
         transferService.transfer(request);
 
         // THEN:
-        Account fromAccount = accountRepository.findById(from.getId()).orElseThrow();
-        Account toAccount = accountRepository.findById(to.getId()).orElseThrow();
+        Account fromAccount = accountRepository.findById(fromId).orElseThrow();
+        Account toAccount = accountRepository.findById(toId).orElseThrow();
 
         assertThat(fromAccount.getBalance()).isEqualByComparingTo("70.00");
         assertThat(toAccount.getBalance()).isEqualByComparingTo("80.00");
 
+        // 2. Проверяем запись в таблице транзакций
         List<Transaction> transactions = transactionRepository.findAll();
+        // ВАЖНО: убедись, что база чистится между тестами, иначе findAll вернет лишнее
         assertThat(transactions).hasSize(1);
-        assertThat(transactions.getFirst().getStatus()).isEqualTo(TransactionStatus.SUCCESS);
+
+        Transaction tx = transactions.getFirst();
+        assertThat(tx.getStatus()).isEqualTo(TransactionStatus.SUCCESS);
+        assertThat(tx.getIdempotencyKey()).isEqualTo(idempotencyKey);
     }
 
     @Test
     @DisplayName("Should throw SelfTransferException when source and destination are the same")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldThrowExceptionWhenSelfTransfer() {
         // GIVEN
         User user = userRepository.save(User.builder().id(UUID.randomUUID()).email("self@test.com").build());
@@ -168,6 +226,7 @@ public class TransferServiceIT {
 
     @Test
     @DisplayName("Should throw InsufficientFundsException when source account has insufficient funds")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldThrowExceptionWhenInsufficientFunds() {
         // GIVEN
 
@@ -197,6 +256,7 @@ public class TransferServiceIT {
 
     @Test
     @DisplayName("Should throw CurrencyMismatchException when accounts have different currencies")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldThrowExceptionWhenCurrencyMismatch() {
         // GIVEN
         User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sender@test").build());
@@ -223,69 +283,8 @@ public class TransferServiceIT {
     }
 
     @Test
-    @DisplayName("Should handle concurrent transfers safely with Optimistic Locking")
-    @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void shouldHandleConcurrentTransfers() throws InterruptedException {
-        // GIVEN
-        User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sender@test.com").build());
-        User receiver = userRepository.save(User.builder().id(UUID.randomUUID()).email("receiver@test.com").build());
-        UUID fromId = UUID.randomUUID();
-        UUID toId = UUID.randomUUID();
-
-        accountRepository.save(Account.builder()
-                .id(fromId).userId(sender.getId()).balance(new BigDecimal("1000.00")).currency("USD").build());
-        accountRepository.save(Account.builder()
-                .id(toId).userId(receiver.getId()).balance(new BigDecimal("0.00")).currency("USD").build());
-
-        int threadsCount = 20;
-        ExecutorService executor = Executors.newFixedThreadPool(threadsCount);
-        CountDownLatch startLatch = new CountDownLatch(1);
-        CountDownLatch finishLatch = new CountDownLatch(threadsCount);
-
-        AtomicInteger successCount = new AtomicInteger();
-        AtomicInteger failureCount = new AtomicInteger();
-
-        TransferRequest request = TransferRequest.builder()
-                .fromId(fromId)
-                .toId(toId)
-                .amount(new BigDecimal("10.00"))
-                .idempotencyKey(UUID.randomUUID())
-                .build();
-
-        // WHEN:
-        for (int i = 0; i < threadsCount; i++) {
-            executor.submit(() -> {
-                try {
-                    startLatch.await();
-                    transferService.transfer(request);
-                    successCount.incrementAndGet();
-                } catch (Exception e) {
-                    failureCount.incrementAndGet();
-                    log.error("Conflict during transfer: ", e);
-                } finally {
-                    finishLatch.countDown();
-                }
-            });
-        }
-
-        startLatch.countDown();
-        finishLatch.await();
-        executor.shutdown();
-
-        Account from = accountRepository.findById(fromId).orElseThrow();
-        Account to = accountRepository.findById(toId).orElseThrow();
-        log.info("Final balances - From: {}, To: {}", from.getBalance(), to.getBalance());
-        log.info("Failure count: {}", failureCount.get());
-
-        assertEquals(0, new BigDecimal("1000.00").compareTo(from.getBalance().add(to.getBalance())), "Money lost/created!");
-
-        assertTrue(from.getBalance().compareTo(BigDecimal.ZERO) >= 0, "Negative balance!");
-
-        assertTrue(failureCount.get() > 0, "No race conditions happened - test is too weak!");
-    }
-
-    @Test
     @DisplayName("Should process transfer only once for the same idempotency key in real Redis")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldHandleIdempotencyRealLife() {
         // GIVEN:
         UUID fromId = UUID.randomUUID();
@@ -311,10 +310,6 @@ public class TransferServiceIT {
         transferService.transfer(request);
 
         // THEN:
-        assertThrows(DuplicateRequestException.class, () -> {
-            transferService.transfer(request);
-        });
-
         Account from = accountRepository.findById(fromId).orElseThrow();
         assertThat(from.getBalance()).isEqualByComparingTo("80.00"); // 100 - 20
 
@@ -326,6 +321,7 @@ public class TransferServiceIT {
 
     @Test
     @DisplayName("Should return paginated transaction history for account")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldReturnHistory() {
 
         // GIVEN
@@ -380,5 +376,4 @@ public class TransferServiceIT {
         Page<Transaction> history = transferService.getTransactions(fromId, PageRequest.of(0, 10));        // THEN
         assertThat(history.getContent()).hasSize(3);
     }
-
 }

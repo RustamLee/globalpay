@@ -2,5 +2,6 @@
 <project version="4">
   <component name="SqlDialectMappings">
     <file url="file://$PROJECT_DIR$/src/main/resources/db/migration/V2__add_idempotency_key_to_transactions.sql" dialect="GenericSQL" />
+    <file url="file://$PROJECT_DIR$/src/main/resources/db/migration/V3__add_updated_at_and_failure_reason_to_transactions.sql" dialect="GenericSQL" />
   </component>
 </project>

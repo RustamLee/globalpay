@@ -2,6 +2,8 @@ package org.example.global_pay.domain;
 
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -38,8 +40,17 @@ public class Transaction {
     private TransactionStatus status;
 
     @Column(name = "created_at")
+    @CreationTimestamp
     private LocalDateTime createdAt;
 
-    @Column(name = "idempotency_key", unique = true)
+    @Column(name = "idempotency_key", unique = true, nullable = false)
     private UUID idempotencyKey;
+
+    @Column(name = "failure_reason")
+    private String failureReason;
+
+    @UpdateTimestamp
+    @Column(name = "updated_at")
+    private LocalDateTime updatedAt;
+
 }
