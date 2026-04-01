@@ -9,6 +9,7 @@ import org.example.global_pay.domain.TransactionStatus;
 import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.AccountNotFoundException;
 import org.example.global_pay.exception.CurrencyMismatchException;
+import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.SelfTransferException;
 import org.example.global_pay.repository.AccountRepository;
 import org.example.global_pay.repository.TransactionRepository;
@@ -17,7 +18,6 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Component
@@ -28,7 +28,6 @@ public class MoneyTransferProcessor {
     private final AccountRepository accountRepository;
     private final TransactionRepository transactionRepository;
 
-    @Transactional
     public void execute(TransferRequest request, Transaction transaction) {
         UUID fromId = request.getFromId();
         UUID toId = request.getToId();
@@ -38,9 +37,9 @@ public class MoneyTransferProcessor {
             throw new SelfTransferException("Cannot transfer to the same account");
         }
 
-        Account from = accountRepository.findById(fromId)
+        Account from = accountRepository.findByIdForUpdate(fromId)
                 .orElseThrow(() -> new AccountNotFoundException("Account not found: " + fromId));
-        Account to = accountRepository.findById(toId)
+        Account to = accountRepository.findByIdForUpdate(toId)
                 .orElseThrow(() -> new AccountNotFoundException("Account not found: " + toId));
 
         if (!from.getCurrency().equals(to.getCurrency())) {
@@ -58,23 +57,25 @@ public class MoneyTransferProcessor {
         log.info("Transaction {} committed successfully", transaction.getId());
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public Transaction createPendingTransaction(TransferRequest request) {
-        Transaction tx = Transaction.builder()
-                .id(UUID.randomUUID())
-                .idempotencyKey(request.getIdempotencyKey())
-                .fromAccountId(request.getFromId())
-                .toAccountId(request.getToId())
-                .amountSent(request.getAmount())
-                .amountReceived(request.getAmount())
-                .exchangeRate(BigDecimal.ONE)
-                .status(TransactionStatus.PENDING)
-                .createdAt(LocalDateTime.now())
-                .build();
-        return transactionRepository.save(tx);
+    public void executeWithLock(TransferRequest request, Transaction transaction) {
+        if (transaction.getStatus() == TransactionStatus.SUCCESS) {
+            return;
+        }
+
+        if (transaction.getStatus() == TransactionStatus.FAILED) {
+            throw new DuplicateRequestException("Transfer already failed for idempotency key: " + request.getIdempotencyKey());
+        }
+
+        if (transaction.getStatus() == TransactionStatus.PROCESSING) {
+            throw new DuplicateRequestException("Transfer is already in progress for idempotency key: " + request.getIdempotencyKey());
+        }
+
+        transaction.setStatus(TransactionStatus.PROCESSING);
+        transactionRepository.save(transaction);
+
+        execute(request, transaction);
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void markAsFailed(Transaction transaction, String reason) {
         transaction.setStatus(TransactionStatus.FAILED);
         transaction.setFailureReason(reason);

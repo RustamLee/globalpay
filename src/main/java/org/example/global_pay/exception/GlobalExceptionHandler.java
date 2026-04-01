@@ -1,9 +1,11 @@
 package org.example.global_pay.exception;
 
+import jakarta.persistence.LockTimeoutException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.example.global_pay.dto.ErrorResponse;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -33,6 +35,7 @@ public class GlobalExceptionHandler {
 
         return new ResponseEntity<>(error, HttpStatus.BAD_REQUEST);
     }
+
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
     public ResponseEntity<ErrorResponse> handleConflict(ObjectOptimisticLockingFailureException ex, HttpServletRequest request) {
         log.error("Unexpected server error at {}: ", request.getRequestURI(), ex);
@@ -49,6 +52,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneralException(Exception ex, HttpServletRequest request) {
+        log.error("Unhandled exception at {}: ", request.getRequestURI(), ex);
         return buildResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Internal Server Error", "Something went wrong on our side", request);
     }
 
@@ -69,14 +73,6 @@ public class GlobalExceptionHandler {
         String errorMessage = ex.getBindingResult().getFieldErrors().stream()
                 .map(error -> error.getField() + ": " + error.getDefaultMessage())
                 .collect(Collectors.joining(", "));
-
-        ErrorResponse error = ErrorResponse.builder()
-                .timestamp(LocalDateTime.now())
-                .status(HttpStatus.BAD_REQUEST.value())
-                .error("Validation Error")
-                .message(errorMessage)
-                .path(request.getRequestURI())
-                .build();
 
         return buildResponse(HttpStatus.BAD_REQUEST, "Validation Error", errorMessage, request);
     }
@@ -103,7 +99,7 @@ public class GlobalExceptionHandler {
                 .error("Duplicate Request")
                 .message(ex.getMessage())
                 .build(
-        );
+                );
         return new ResponseEntity<>(error, HttpStatus.CONFLICT);
     }
 
@@ -119,7 +115,7 @@ public class GlobalExceptionHandler {
                     .message("A request with the same idempotency key already exists.")
                     .path(request.getDescription(false).replace("uri=", ""))
                     .build(
-            );
+                    );
             return new ResponseEntity<>(error, HttpStatus.CONFLICT);
         }
 
@@ -130,7 +126,7 @@ public class GlobalExceptionHandler {
                 .message("An unexpected database error occurred.")
                 .path(request.getDescription(false).replace("uri=", ""))
                 .build(
-        );
+                );
         return new ResponseEntity<>(error, HttpStatus.INTERNAL_SERVER_ERROR);
     }
 
@@ -148,5 +144,34 @@ public class GlobalExceptionHandler {
         return new ResponseEntity<>(error, HttpStatus.NOT_FOUND);
     }
 
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    public ResponseEntity<ErrorResponse> handlePessimisticLockingFailure(PessimisticLockingFailureException ex, HttpServletRequest request) {
+        log.error("Pessimistic locking failure at {}: ", request.getRequestURI(), ex);
+        ErrorResponse error = ErrorResponse.builder()
+                .timestamp(LocalDateTime.now())
+                .status(HttpStatus.CONFLICT.value())
+                .error("Concurrency Conflict")
+                .message("The resource is currently locked by another transaction. Please try again.")
+                .path(request.getRequestURI())
+                .build();
+
+        return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+    }
+
+    @ExceptionHandler(LockTimeoutException.class)
+    public ResponseEntity<ErrorResponse> handleLockTimeout(LockTimeoutException ex, HttpServletRequest request) {
+        log.error("Lock timeout at {}: ", request.getRequestURI(), ex);
+        ErrorResponse error = ErrorResponse.builder()
+                .timestamp(LocalDateTime.now())
+                .status(HttpStatus.SERVICE_UNAVAILABLE.value())
+                .error("Service Temporarily Unavailable")
+                .message("The operation could not be completed due to a lock timeout. Please retry in a moment.")
+                .path(request.getRequestURI())
+                .build();
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header("Retry-After", "2")
+                .body(error);
+    }
 
 }

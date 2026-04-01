@@ -7,7 +7,6 @@ import org.example.global_pay.domain.TransactionStatus;
 import org.example.global_pay.domain.User;
 import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.CurrencyMismatchException;
-import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.InsufficientFundsException;
 import org.example.global_pay.exception.SelfTransferException;
 import org.example.global_pay.repository.AccountRepository;
@@ -24,7 +23,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -151,6 +149,66 @@ public class TransferServiceIT {
         assertThat(to.getBalance()).isEqualByComparingTo(new BigDecimal(successCount.get()).multiply(new BigDecimal("10.00")));
     }
 
+    @Test
+    @DisplayName("Should prevent double spending for concurrent replay with the same idempotency key")
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void shouldPreventDoubleSpendingForSameIdempotencyKey() throws InterruptedException {
+        User sender = userRepository.save(User.builder().id(UUID.randomUUID()).email("sender-replay@test.com").build());
+        User receiver = userRepository.save(User.builder().id(UUID.randomUUID()).email("receiver-replay@test.com").build());
+
+        UUID fromId = UUID.randomUUID();
+        UUID toId = UUID.randomUUID();
+        UUID idempotencyKey = UUID.randomUUID();
+
+        accountRepository.save(Account.builder()
+                .id(fromId).userId(sender.getId()).balance(new BigDecimal("100.00")).currency("USD").build());
+        accountRepository.save(Account.builder()
+                .id(toId).userId(receiver.getId()).balance(new BigDecimal("0.00")).currency("USD").build());
+
+        TransferRequest request = TransferRequest.builder()
+                .fromId(fromId)
+                .toId(toId)
+                .amount(new BigDecimal("10.00"))
+                .idempotencyKey(idempotencyKey)
+                .build();
+
+        int threadsCount = 20;
+        ExecutorService executor = Executors.newFixedThreadPool(threadsCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch finishLatch = new CountDownLatch(threadsCount);
+
+        for (int i = 0; i < threadsCount; i++) {
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    transferService.transfer(request);
+                } catch (Exception e) {
+                    // Duplicate/conflict outcomes are acceptable here; the assertion is on balance and tx count.
+                    log.info("Concurrent replay outcome: {}", e.getClass().getSimpleName());
+                } finally {
+                    finishLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        finishLatch.await();
+        executor.shutdown();
+
+        Account from = accountRepository.findById(fromId).orElseThrow();
+        Account to = accountRepository.findById(toId).orElseThrow();
+
+        assertThat(from.getBalance()).isEqualByComparingTo("90.00");
+        assertThat(to.getBalance()).isEqualByComparingTo("10.00");
+
+        List<Transaction> transactions = transactionRepository.findAll().stream()
+                .filter(t -> idempotencyKey.equals(t.getIdempotencyKey()))
+                .toList();
+
+        assertThat(transactions).hasSize(1);
+        assertThat(transactions.getFirst().getStatus()).isEqualTo(TransactionStatus.SUCCESS);
+    }
+
 
     @Test
     @DisplayName("Should transfer money between accounts")
@@ -226,7 +284,6 @@ public class TransferServiceIT {
 
     @Test
     @DisplayName("Should throw InsufficientFundsException when source account has insufficient funds")
-    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     void shouldThrowExceptionWhenInsufficientFunds() {
         // GIVEN
 

@@ -66,8 +66,8 @@ public class MoneyTransferProcessorTest {
         Transaction transaction = Transaction.builder()
                 .id(UUID.randomUUID()).status(TransactionStatus.PENDING).build();
 
-        when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
-        when(accountRepository.findById(toId)).thenReturn(Optional.of(toAccount));
+        when(accountRepository.findByIdForUpdate(fromId)).thenReturn(Optional.of(fromAccount));
+        when(accountRepository.findByIdForUpdate(toId)).thenReturn(Optional.of(toAccount));
 
         // WHEN
         processor.execute(request, transaction);
@@ -90,7 +90,7 @@ public class MoneyTransferProcessorTest {
         Account from = Account.builder().id(UUID.randomUUID()).balance(new BigDecimal("100")).currency("USD").build();
         Account to = Account.builder().id(UUID.randomUUID()).balance(new BigDecimal("100")).currency("EUR").build();
 
-        when(accountRepository.findById(any())).thenReturn(Optional.of(from)).thenReturn(Optional.of(to));
+        when(accountRepository.findByIdForUpdate(any())).thenReturn(Optional.of(from)).thenReturn(Optional.of(to));
 
         TransferRequest request = TransferRequest.builder().fromId(from.getId()).toId(to.getId()).amount(new BigDecimal("10")).build();
         Transaction tx = new Transaction();
@@ -110,7 +110,7 @@ public class MoneyTransferProcessorTest {
         UUID toId = UUID.randomUUID();
         BigDecimal amount = new BigDecimal("100.00");
 
-        when(accountRepository.findById(fromId)).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(fromId)).thenReturn(Optional.empty());
 
         TransferRequest request = TransferRequest.builder()
                 .fromId(fromId)
@@ -123,7 +123,7 @@ public class MoneyTransferProcessorTest {
         // WHEN & THEN
         assertThrows(AccountNotFoundException.class, () -> processor.execute(request, tx));
 
-        verify(accountRepository).findById(fromId);
+        verify(accountRepository).findByIdForUpdate(fromId);
         verify(accountRepository, never()).save(any());
         verifyNoInteractions(transactionRepository);
     }
@@ -142,8 +142,8 @@ public class MoneyTransferProcessorTest {
                 .currency("USD")
                 .build();
 
-        when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
-        when(accountRepository.findById(toId)).thenReturn(Optional.empty());
+        when(accountRepository.findByIdForUpdate(fromId)).thenReturn(Optional.of(fromAccount));
+        when(accountRepository.findByIdForUpdate(toId)).thenReturn(Optional.empty());
 
         TransferRequest request = TransferRequest.builder()
                 .fromId(fromId)
@@ -156,8 +156,8 @@ public class MoneyTransferProcessorTest {
         // WHEN & THEN
         assertThrows(AccountNotFoundException.class, () -> processor.execute(request, tx));
 
-        verify(accountRepository).findById(fromId);
-        verify(accountRepository).findById(toId);
+        verify(accountRepository).findByIdForUpdate(fromId);
+        verify(accountRepository).findByIdForUpdate(toId);
         verify(accountRepository, never()).save(any());
         verifyNoInteractions(transactionRepository);
     }
@@ -203,8 +203,8 @@ public class MoneyTransferProcessorTest {
                 .currency("USD")
                 .build();
 
-        when(accountRepository.findById(fromId)).thenReturn(Optional.of(fromAccount));
-        when(accountRepository.findById(toId)).thenReturn(Optional.of(toAccount));
+        when(accountRepository.findByIdForUpdate(fromId)).thenReturn(Optional.of(fromAccount));
+        when(accountRepository.findByIdForUpdate(toId)).thenReturn(Optional.of(toAccount));
 
         TransferRequest request = TransferRequest.builder()
                 .fromId(fromId)
@@ -217,8 +217,8 @@ public class MoneyTransferProcessorTest {
         // WHEN & THEN
         assertThrows(InsufficientFundsException.class, () -> processor.execute(request, tx));
 
-        verify(accountRepository).findById(fromId);
-        verify(accountRepository).findById(toId);
+        verify(accountRepository).findByIdForUpdate(fromId);
+        verify(accountRepository).findByIdForUpdate(toId);
         verify(accountRepository, never()).save(any());
         verifyNoInteractions(transactionRepository);
     }

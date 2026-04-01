@@ -4,7 +4,6 @@ import org.example.global_pay.domain.Transaction;
 import org.example.global_pay.domain.TransactionStatus;
 import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.DuplicateRequestException;
-import org.example.global_pay.repository.AccountRepository;
 import org.example.global_pay.repository.TransactionRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -22,12 +21,15 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 @ExtendWith(MockitoExtension.class)
 public class TransferServiceTest {
-    @Mock
-    private AccountRepository accountRepository;
 
     @Mock
     private TransactionRepository transactionRepository;
@@ -49,73 +51,62 @@ public class TransferServiceTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOps);
     }
 
-
     @Test
-    @DisplayName("Should successfully coordinate money transfer")
+    @DisplayName("Should successfully coordinate money transfer with DB lock flow")
     void shouldTransferMoneyBetweenAccounts() {
-        // GIVEN
         UUID fromId = UUID.randomUUID();
         UUID toId = UUID.randomUUID();
+        UUID idempotencyKey = UUID.randomUUID();
 
         TransferRequest request = TransferRequest.builder()
                 .fromId(fromId)
                 .toId(toId)
                 .amount(new BigDecimal("100.00"))
-                .idempotencyKey(UUID.randomUUID())
+                .idempotencyKey(idempotencyKey)
                 .build();
 
         Transaction pendingTx = Transaction.builder()
                 .id(UUID.randomUUID())
                 .status(TransactionStatus.PENDING)
-                .idempotencyKey(request.getIdempotencyKey())
+                .idempotencyKey(idempotencyKey)
                 .build();
 
-        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenReturn(true);
-        when(moneyTransferProcessor.createPendingTransaction(any(TransferRequest.class))).thenReturn(pendingTx);
+        when(valueOps.get(anyString())).thenReturn(null);
+        when(transactionRepository.insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), anyString(), any()))
+                .thenReturn(1);
+        when(transactionRepository.findByIdempotencyKeyForUpdate(idempotencyKey)).thenReturn(Optional.of(pendingTx));
 
-        // WHEN
         transferService.transfer(request);
 
-        // THEN
-        verify(moneyTransferProcessor).createPendingTransaction(request);
-        verify(moneyTransferProcessor).execute(request, pendingTx);
-
-        // 3. Проверяем финализацию в Redis
-        verify(valueOps).set(anyString(), eq("COMPLETED"), any());
-
+        verify(transactionRepository).insertPendingIfAbsent(any(), eq(fromId), eq(toId), any(), any(), any(), eq("PENDING"), eq(idempotencyKey));
+        verify(moneyTransferProcessor).executeWithLock(request, pendingTx);
+        verify(valueOps).set(anyString(), eq("COMPLETED"), any(Duration.class));
     }
-
 
     @Test
-    @DisplayName("Should prevent duplicate transfers with same idempotency key")
-    void shouldPreventDuplicateTransfers() {
-        // GIVEN
-        UUID fromId = UUID.randomUUID();
-        UUID toId = UUID.randomUUID();
+    @DisplayName("Should reject replay when transaction is already FAILED")
+    void shouldRejectFailedReplay() {
         UUID idempotencyKey = UUID.randomUUID();
-        BigDecimal amount = new BigDecimal("100.00");
-
         TransferRequest request = TransferRequest.builder()
-                .fromId(fromId)
-                .toId(toId)
+                .fromId(UUID.randomUUID())
+                .toId(UUID.randomUUID())
                 .idempotencyKey(idempotencyKey)
-                .amount(amount)
+                .amount(new BigDecimal("100.00"))
                 .build();
-        when(transactionRepository.findByIdempotencyKey(idempotencyKey))
-                .thenReturn(Optional.empty());
 
-        when(valueOps.setIfAbsent(anyString(), anyString(), any(Duration.class)))
-                .thenReturn(false);
+        Transaction failedTx = Transaction.builder()
+                .id(UUID.randomUUID())
+                .status(TransactionStatus.FAILED)
+                .idempotencyKey(idempotencyKey)
+                .build();
 
-        // WHEN & THEN
-        assertThrows(DuplicateRequestException.class, () -> {
-            transferService.transfer(request);
-        });
-        verify(transactionRepository).findByIdempotencyKey(idempotencyKey);
-        verify(valueOps).setIfAbsent(anyString(), anyString(), any());
+        when(valueOps.get(anyString())).thenReturn(null);
+        when(transactionRepository.insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), anyString(), any()))
+                .thenReturn(0);
+        when(transactionRepository.findByIdempotencyKeyForUpdate(idempotencyKey)).thenReturn(Optional.of(failedTx));
 
-        verifyNoInteractions(accountRepository);
-        verifyNoInteractions(moneyTransferProcessor);
+        assertThrows(DuplicateRequestException.class, () -> transferService.transfer(request));
+
+        verifyNoMoreInteractions(moneyTransferProcessor);
     }
-
 }
