@@ -366,6 +366,12 @@ The project includes:
 - **concurrency-oriented scenarios** to verify idempotency and balance consistency
 Integration tests require Docker because Testcontainers starts real infrastructure.
 ---
+### ✅ Code Coverage
+The project uses **JaCoCo** for test coverage analysis. 
+Current total instruction coverage is **78%**, with **100%** coverage for critical API Controllers.
+
+![JaCoCo Coverage Report](./docs/jacoco-coverage.png)
+---
 ## Observability
 ### Health and metrics
 Spring Boot Actuator exposes:
