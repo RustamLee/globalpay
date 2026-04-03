@@ -34,24 +34,134 @@ The current HTTP API exposes:
 - **Metrics exposure** through Spring Boot Actuator + Prometheus
 ---
 ## Architecture at a glance
-```text
-Client
-  |
-  v
-TransferController
-  |
-  v
-TransferService
-  |-- Redis: completed idempotency cache
-  |-- TransactionRepository: insert-if-absent + transaction row lock
-  |
-  v
-MoneyTransferProcessor
-  |-- AccountRepository: pessimistic account locks
-  |-- TransactionRepository: status updates
-  |
-  v
-PostgreSQL
+### 1. Happy Path — Successful Money Transfer
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as Client (Postman/UI)
+    participant API as TransferController
+    participant Service as TransferService
+    participant Repo as AccountRepository
+    participant TransRepo as TransactionRepository
+
+    User->>API: POST /api/v1/transfer (TransferRequest)
+    API->>Service: transfer(transferRequest)
+    activate Service
+    Service->>Repo: findById(fromAccountId)
+    Repo-->>Service: fromAccount
+    Service->>Repo: findById(toAccountId)
+    Repo-->>Service: toAccount
+    Note over Service: Validate balance & account status
+    Service->>Repo: save(fromAccount)
+    Service->>Repo: save(toAccount)
+    Service->>TransRepo: save(transaction)
+    Service-->>API: TransferResponse (Success)
+    deactivate Service
+    API-->>User: 200 OK (Transfer Details)
+```
+
+### 2. Business Errors — Transaction Failure Scenarios
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as Client (Postman/UI)
+    participant API as TransferController
+    participant Service as TransferService
+    participant Repo as AccountRepository
+    participant TransRepo as TransactionRepository
+
+    Note over User, TransRepo: Validation & Error Handling Flow
+
+    User->>API: POST /api/v1/transfer (Idempotency-Key)
+    API->>Service: transfer(transferRequest)
+    activate Service
+
+    alt Duplicate request
+        Service-->>API: throw DuplicateRequestException
+        API-->>User: 409 Conflict (Duplicate request)
+    else Self-transfer
+        Service->>TransRepo: save(status: FAILED, reason: "SELF_TRANSFER")
+        Service-->>API: throw SelfTransferException
+        API-->>User: 400 Bad Request (Self-transfer)
+    else Account not found
+        Service->>Repo: findById(accountId)
+        Repo-->>Service: null
+        Service->>TransRepo: save(status: FAILED, reason: "ACCOUNT_NOT_FOUND")
+        Service-->>API: throw AccountNotFoundException
+        API-->>User: 404 Not Found (Account not found)
+    else Currency mismatch
+        Service->>Repo: findById(from/to)
+        Repo-->>Service: fromAccount, toAccount
+        Service->>TransRepo: save(status: FAILED, reason: "CURRENCY_MISMATCH")
+        Service-->>API: throw CurrencyMismatchException
+        API-->>User: 400 Bad Request (Currency mismatch)
+    else Insufficient funds
+        Service->>Repo: findById(from)
+        Repo-->>Service: fromAccount
+        Service->>TransRepo: save(status: FAILED, reason: "INSUFFICIENT_FUNDS")
+        Service-->>API: throw InsufficientFundsException
+        API-->>User: 400 Bad Request (Insufficient funds)
+    end
+
+    deactivate Service
+```
+
+### 3. Idempotency Error — Duplicate Request Handling
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as Client (Postman/UI)
+    participant API as TransferController
+    participant Service as TransferService
+    participant Redis as RedisCache
+    participant TransRepo as TransactionRepository
+
+    User->>API: POST /api/v1/transfer (Header: Idempotency-Key)
+    API->>Service: transfer(request)
+    activate Service
+
+    Service->>Redis: get(idempotencyKey)
+    alt Key exists
+        Service-->>API: throw DuplicateRequestException (409)
+    else Key not found
+        Service->>Redis: set(idempotencyKey, "PROCESSING", TTL: 24h)
+        Note over Service: Perform Validations (Balance, Currency, etc.)
+        Service->>TransRepo: save(Transaction status: SUCCESS)
+        Service-->>API: TransferResponse (200 OK)
+    end
+    deactivate Service
+    API-->>User: Result
+```
+
+### 4. ER Diagram (Database Schema)
+```mermaid
+erDiagram
+    USER {
+        UUID id PK
+        STRING email
+    }
+    ACCOUNT {
+        UUID id PK
+        UUID user_id FK
+        DECIMAL balance
+        STRING currency
+        LONG version
+    }
+    TRANSACTION {
+        UUID id PK
+        UUID from_account_id FK
+        UUID to_account_id FK
+        DECIMAL amount
+        STRING status
+        STRING idempotency_key
+        STRING failure_reason
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
+    USER ||--o{ ACCOUNT : "owns"
+    ACCOUNT ||--o{ TRANSACTION : "source for"
+    ACCOUNT ||--o{ TRANSACTION : "destination for"
 ```
 ### Transfer flow summary
 1. Check Redis for a completed idempotency key
