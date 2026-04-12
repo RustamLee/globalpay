@@ -25,6 +25,9 @@ public class OutboxEvent {
     @Column(nullable = false, columnDefinition = "TEXT")
     private String payload;
 
+    @Column(name="last_error")
+    private String lastError;
+
     @Enumerated(EnumType.STRING)
     private OutboxStatus status = OutboxStatus.PENDING;
 

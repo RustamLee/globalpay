@@ -1,5 +1,6 @@
 package org.example.global_pay.service.gateway;
 
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.extern.slf4j.Slf4j;
 import org.example.global_pay.domain.GatewayStatus;
 import org.example.global_pay.dto.GatewayResponse;
@@ -13,6 +14,7 @@ import java.util.UUID;
 public class FakeExternalGateway implements PaymentGateway {
 
     @Override
+    @CircuitBreaker(name = "paymentGatewayCB")
     public GatewayResponse process(PaymentProviderRequest request) {
         log.info("Processing external payment: {}", request.externalTransactionId());
         simulateLatency();

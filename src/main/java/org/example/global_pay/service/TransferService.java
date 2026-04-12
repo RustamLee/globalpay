@@ -41,6 +41,7 @@ public class TransferService {
     private final OutboxEventRepository outboxEventRepository;
     private final ObjectMapper objectMapper;
 
+
     private static final String IDEMPOTENCY_PREFIX = "transfer_idempotency:";
     private static final Duration IDEMPOTENCY_TTL = Duration.ofHours(24);
 

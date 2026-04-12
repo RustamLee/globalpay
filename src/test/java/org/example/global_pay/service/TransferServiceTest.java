@@ -1,9 +1,15 @@
 package org.example.global_pay.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.global_pay.domain.Account;
+import org.example.global_pay.domain.OutboxEvent;
 import org.example.global_pay.domain.Transaction;
 import org.example.global_pay.domain.TransactionStatus;
 import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.DuplicateRequestException;
+import org.example.global_pay.repository.AccountRepository;
+import org.example.global_pay.repository.OutboxEventRepository;
 import org.example.global_pay.repository.TransactionRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -46,6 +52,15 @@ public class TransferServiceTest {
     @Mock
     private ValueOperations<String, String> valueOps;
 
+    @Mock
+    private AccountRepository accountRepository;
+
+    @Mock
+    private OutboxEventRepository outboxEventRepository;
+
+    @Mock
+    private ObjectMapper objectMapper;
+
     @BeforeEach
     void setUpRedis() {
         when(redisTemplate.opsForValue()).thenReturn(valueOps);
@@ -53,10 +68,17 @@ public class TransferServiceTest {
 
     @Test
     @DisplayName("Should successfully coordinate money transfer with DB lock flow")
-    void shouldTransferMoneyBetweenAccounts() {
+    void shouldTransferMoneyBetweenAccounts ()throws JsonProcessingException {
+
+        // GIVEN
         UUID fromId = UUID.randomUUID();
         UUID toId = UUID.randomUUID();
         UUID idempotencyKey = UUID.randomUUID();
+
+        Account toAccount = Account.builder()
+                .id(toId)
+                .currency("USD")
+                .build();
 
         TransferRequest request = TransferRequest.builder()
                 .fromId(fromId)
@@ -71,6 +93,9 @@ public class TransferServiceTest {
                 .idempotencyKey(idempotencyKey)
                 .build();
 
+        // WHEN
+        when(accountRepository.findById(toId)).thenReturn(Optional.of(toAccount));
+        when(objectMapper.writeValueAsString(any())).thenReturn("{}");
         when(valueOps.get(anyString())).thenReturn(null);
         when(transactionRepository.insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), anyString(), any()))
                 .thenReturn(1);
@@ -81,6 +106,7 @@ public class TransferServiceTest {
         verify(transactionRepository).insertPendingIfAbsent(any(), eq(fromId), eq(toId), any(), any(), any(), eq("PENDING"), eq(idempotencyKey));
         verify(moneyTransferProcessor).executeWithLock(request, pendingTx);
         verify(valueOps).set(anyString(), eq("COMPLETED"), any(Duration.class));
+        verify(outboxEventRepository).save(any(OutboxEvent.class));
     }
 
     @Test
