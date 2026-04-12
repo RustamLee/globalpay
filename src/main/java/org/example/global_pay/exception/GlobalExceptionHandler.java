@@ -104,31 +104,24 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
-    public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(DataIntegrityViolationException ex, WebRequest request) {
-        log.warn("Database integrity violation: {}", ex.getMessage());
+    public ResponseEntity<ErrorResponse> handleDataIntegrityViolation(DataIntegrityViolationException ex, HttpServletRequest request) {
+        String rootMsg = ex.getMostSpecificCause().getMessage();
+        log.warn("Database integrity violation at {}: {}", request.getRequestURI(), rootMsg);
 
-        if (ex.getMessage() != null && ex.getMessage().contains("idempotency_key")) {
-            ErrorResponse error = ErrorResponse.builder()
-                    .timestamp(LocalDateTime.now())
-                    .status(HttpStatus.CONFLICT.value())
-                    .error("Duplicate Request")
-                    .message("A request with the same idempotency key already exists.")
-                    .path(request.getDescription(false).replace("uri=", ""))
-                    .build(
-                    );
-            return new ResponseEntity<>(error, HttpStatus.CONFLICT);
+        if (rootMsg != null && rootMsg.contains("idempotency_key")) {
+            return buildResponse(HttpStatus.CONFLICT, "Duplicate Request",
+                    "A request with the same idempotency key already exists.", request);
         }
 
-        ErrorResponse error = ErrorResponse.builder()
-                .timestamp(LocalDateTime.now())
-                .status(HttpStatus.INTERNAL_SERVER_ERROR.value())
-                .error("Database Error")
-                .message("An unexpected database error occurred.")
-                .path(request.getDescription(false).replace("uri=", ""))
-                .build(
-                );
-        return new ResponseEntity<>(error, HttpStatus.INTERNAL_SERVER_ERROR);
+        if (rootMsg != null && rootMsg.contains("violates foreign key constraint")) {
+            return buildResponse(HttpStatus.BAD_REQUEST, "Invalid Reference",
+                    "One of the specified accounts does not exist in our system.", request);
+        }
+
+        return buildResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Database Error",
+                "An unexpected database error occurred.", request);
     }
+
 
     @ExceptionHandler(AccountNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(AccountNotFoundException ex, HttpServletRequest request) {

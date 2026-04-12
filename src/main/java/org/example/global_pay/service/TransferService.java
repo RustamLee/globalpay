@@ -1,12 +1,19 @@
 package org.example.global_pay.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.global_pay.domain.Account;
+import org.example.global_pay.domain.OutboxEvent;
 import org.example.global_pay.domain.Transaction;
 import org.example.global_pay.domain.TransactionStatus;
+import org.example.global_pay.dto.PaymentProviderRequest;
 import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.GlobalPayException;
+import org.example.global_pay.repository.AccountRepository;
+import org.example.global_pay.repository.OutboxEventRepository;
 import org.example.global_pay.repository.TransactionRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -28,8 +35,11 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class TransferService {
     private final TransactionRepository transactionRepository;
+    private final AccountRepository accountRepository;
     private final StringRedisTemplate redisTemplate;
     private final MoneyTransferProcessor processor;
+    private final OutboxEventRepository outboxEventRepository;
+    private final ObjectMapper objectMapper;
 
     private static final String IDEMPOTENCY_PREFIX = "transfer_idempotency:";
     private static final Duration IDEMPOTENCY_TTL = Duration.ofHours(24);
@@ -77,6 +87,7 @@ public class TransferService {
 
         try {
             processor.executeWithLock(request, tx);
+            createOutboxEvent(tx, request);
             cacheCompletedAfterCommit(key);
         } catch (Exception e) {
             if (e instanceof GlobalPayException
@@ -109,5 +120,32 @@ public class TransferService {
 
     public Page<Transaction> getTransactions(UUID accountId, Pageable pageable) {
         return transactionRepository.findAllByFromAccountIdOrToAccountIdOrderByCreatedAtDesc(accountId, accountId, pageable);
+    }
+
+    private void createOutboxEvent(Transaction tx, TransferRequest request) {
+        try {
+            Account toAccount = accountRepository.findById(request.getToId())
+                    .orElseThrow(() -> new IllegalStateException("Account not found: " + request.getToId()));
+            PaymentProviderRequest gatewayReq = new PaymentProviderRequest(
+                    tx.getId().toString(),
+                    request.getAmount(),
+                    toAccount.getCurrency(),
+                    request.getToId().toString(),
+                    "Transfer from " + request.getFromId()
+            );
+
+            String payload = objectMapper.writeValueAsString(gatewayReq);
+
+            OutboxEvent event = new OutboxEvent();
+            event.setAggregateId(tx.getId().toString());
+            event.setType("EXTERNAL_PAYMENT_SEND");
+            event.setPayload(payload);
+
+            outboxEventRepository.save(event);
+            log.info("Outbox event created for transaction: {}", tx.getId());
+
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize outbox payload", e);
+        }
     }
 }
