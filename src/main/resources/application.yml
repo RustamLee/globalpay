@@ -1,3 +1,7 @@
+app:
+  scheduling:
+    enabled: true
+
 spring:
   application:
     name: globalpay

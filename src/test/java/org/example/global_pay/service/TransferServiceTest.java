@@ -20,6 +20,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import static org.mockito.Mockito.*;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -135,4 +136,68 @@ public class TransferServiceTest {
 
         verifyNoMoreInteractions(moneyTransferProcessor);
     }
-}
+
+    @Test
+    @DisplayName("Should throw exception when outbox serialization fails")
+    void shouldThrowExceptionWhenSerializationFails() throws JsonProcessingException{
+        // GIVEN
+        UUID toId = UUID.randomUUID();
+        TransferRequest request = TransferRequest.builder()
+                .fromId(UUID.randomUUID()).toId(toId).amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID()).build();
+        Transaction tx = Transaction.builder().id(UUID.randomUUID()).status(TransactionStatus.PENDING).build();
+
+        when(valueOps.get(anyString())).thenReturn(null);
+        when(transactionRepository.insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), anyString(), any())).thenReturn(1);
+        when(transactionRepository.findByIdempotencyKeyForUpdate(any())).thenReturn(Optional.of(tx));
+        when(accountRepository.findById(toId)).thenReturn(Optional.of(Account.builder().currency("USD").build()));
+
+        when(objectMapper.writeValueAsString(any())).thenThrow(new JsonProcessingException("Error") {});
+
+        // WHEN & THEN
+        assertThrows(RuntimeException.class, () -> transferService.transfer(request));
+        verify(valueOps, never()).set(anyString(), anyString(), any(Duration.class));
+        verify(outboxEventRepository, never()).save(any());
+    }
+
+
+    @Test
+    @DisplayName("Should throw IllegalStateException when recipient account disappears")
+    void shouldThrowExceptionWhenAccountNotFound() {
+        // GIVEN
+        UUID toId = UUID.randomUUID();
+        TransferRequest request = TransferRequest.builder()
+                .fromId(UUID.randomUUID()).toId(toId).amount(new BigDecimal("100.00"))
+                .idempotencyKey(UUID.randomUUID()).build();
+        Transaction tx = Transaction.builder().id(UUID.randomUUID()).status(TransactionStatus.PENDING).build();
+
+        when(valueOps.get(anyString())).thenReturn(null);
+        when(transactionRepository.insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), anyString(), any())).thenReturn(1);
+        when(transactionRepository.findByIdempotencyKeyForUpdate(any())).thenReturn(Optional.of(tx));
+        when(accountRepository.findById(toId)).thenReturn(Optional.empty());
+
+        // WHEN & THEN
+        assertThrows(IllegalStateException.class, () -> transferService.transfer(request));
+        verifyNoInteractions(objectMapper);
+
+    }
+
+    @Test
+    @DisplayName("Should skip DB processing if idempotency key is COMPLETED in Redis")
+    void shouldSkipProcessingIfKeyInRedis() {
+        // GIVEN
+        UUID key = UUID.randomUUID();
+        TransferRequest request = TransferRequest.builder().idempotencyKey(key).build();
+        String redisKey = "transfer_idempotency:" + key;
+        when(valueOps.get(redisKey)).thenReturn("COMPLETED");
+
+        // WHEN
+        transferService.transfer(request);
+
+        // THEN
+        verify(transactionRepository, never()).insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), any(), any());
+        verifyNoInteractions(moneyTransferProcessor);
+    }
+
+
+    }
