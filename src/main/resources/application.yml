@@ -1,7 +1,8 @@
 app:
   scheduling:
     enabled: true
-
+  gateway:
+    url: ${GATEWAY_URL:https://globalpayments.com}
 spring:
   application:
     name: globalpay

@@ -1,46 +1,43 @@
 package org.example.global_pay.service.gateway;
 
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import org.springframework.beans.factory.annotation.Value;
 import lombok.extern.slf4j.Slf4j;
-import org.example.global_pay.domain.GatewayStatus;
 import org.example.global_pay.dto.GatewayResponse;
 import org.example.global_pay.dto.PaymentProviderRequest;
+import org.example.global_pay.exception.GatewayException;
+import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.stereotype.Component;
-
-import java.util.UUID;
+import org.springframework.web.client.RestTemplate;
+import java.time.Duration;
 
 @Component
 @Slf4j
 public class FakeExternalGateway implements PaymentGateway {
 
+    private final RestTemplate restTemplate;
+    private final String gatewayUrl;
+
+    public FakeExternalGateway(RestTemplateBuilder builder,
+                               @Value("${app.gateway.url}") String gatewayUrl) {
+        this.restTemplate = builder
+                .connectTimeout(Duration.ofSeconds(2))
+                .readTimeout(Duration.ofSeconds(2))
+                .build();
+        this.gatewayUrl = gatewayUrl;
+    }
+
     @Override
     @CircuitBreaker(name = "paymentGatewayCB")
     public GatewayResponse process(PaymentProviderRequest request) {
-        log.info("Processing external payment: {}", request.externalTransactionId());
-        simulateLatency();
-        simulateRandomFailure();
-        String gatewayRef = "GWP-" + UUID.randomUUID().toString().substring(0, 8);
+        log.info("Calling external gateway at: {}", gatewayUrl);
 
-        return new GatewayResponse(
-                request.externalTransactionId(),
-                GatewayStatus.SUCCESS,
-                gatewayRef
-        );
-    }
-
-    private void simulateLatency() {
         try {
-            long latency = 500 + (long) (Math.random() * 2500);
-            Thread.sleep(latency);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
+            return restTemplate.postForObject(gatewayUrl + "/v1/payments", request, GatewayResponse.class);
 
-    private void simulateRandomFailure() {
-        if (Math.random() < 0.2) {
-            log.error("External gateway is down (Simulated failure)");
-            throw new RuntimeException("Gateway Timeout / Service Unavailable");
+        } catch (Exception e) {
+            log.error("Gateway call failed for tx {}: {}", request.externalTransactionId(), e.getMessage());
+            throw new GatewayException("Gateway error: " + e.getMessage());
         }
     }
 
