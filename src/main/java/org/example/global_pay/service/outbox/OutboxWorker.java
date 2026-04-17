@@ -26,12 +26,12 @@ public class OutboxWorker {
     private final PaymentGateway paymentGateway;
     private final ObjectMapper objectMapper;
 
-    @Scheduled(fixedDelay = 5000)
+    @Scheduled(fixedDelay = 1000)
     @Transactional
     public void processOutbox() {
         List<OutboxEvent> events = outboxEventRepository.findPendingToProcess(
                 LocalDateTime.now(),
-                PageRequest.of(0, 10)
+                PageRequest.of(0, 100)
         );
 
         if (events.isEmpty()) {

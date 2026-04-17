@@ -1,6 +1,7 @@
 package org.example.global_pay.service.gateway;
 
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import org.example.global_pay.domain.GatewayStatus;
 import org.springframework.beans.factory.annotation.Value;
 import lombok.extern.slf4j.Slf4j;
 import org.example.global_pay.dto.GatewayResponse;
@@ -10,6 +11,7 @@ import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import java.time.Duration;
+import java.util.UUID;
 
 @Component
 @Slf4j
@@ -30,10 +32,15 @@ public class FakeExternalGateway implements PaymentGateway {
     @Override
     @CircuitBreaker(name = "paymentGatewayCB")
     public GatewayResponse process(PaymentProviderRequest request) {
-        log.info("Calling external gateway at: {}", gatewayUrl);
+        log.info("Simulating success for event: {}", request.externalTransactionId());
 
         try {
-            return restTemplate.postForObject(gatewayUrl + "/v1/payments", request, GatewayResponse.class);
+//            return restTemplate.postForObject(gatewayUrl + "/v1/payments", request, GatewayResponse.class);
+            return new GatewayResponse(
+                    request.externalTransactionId(),
+                    GatewayStatus.SUCCESS,
+                    "FIXED-" + UUID.randomUUID().toString().substring(0, 8)
+            );
 
         } catch (Exception e) {
             log.error("Gateway call failed for tx {}: {}", request.externalTransactionId(), e.getMessage());

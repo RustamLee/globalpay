@@ -21,7 +21,6 @@ import java.util.UUID;
 @RequiredArgsConstructor
 @Slf4j
 public class TransferController {
-    private static final String IDEMPOTENCY_HIT_HEADER = "X-Idempotency-Hit";
     private final TransferService transferService;
 
     @PostMapping
@@ -33,11 +32,9 @@ public class TransferController {
     @ApiResponse(responseCode = "500", description = "Internal server error")
     public ResponseEntity<String> transfer(@Valid @RequestBody TransferRequest request) {
         log.info("Transfer request to transfer {} from account {} to account {}", request.getAmount(), request.getFromId(), request.getToId());
-        boolean idempotencyHit = transferService.transfer(request);
+        transferService.transfer(request);
         log.info("Transfer successful for request from {}", request.getFromId());
-        return ResponseEntity.ok()
-                .header(IDEMPOTENCY_HIT_HEADER, Boolean.toString(idempotencyHit))
-                .body("Transfer successful");
+        return ResponseEntity.ok("Transfer successful");
     }
 
     @GetMapping("/accounts/{accountId}/transactions")
@@ -53,4 +50,8 @@ public class TransferController {
 
         return ResponseEntity.ok(history);
     }
+
+
+
+
 }

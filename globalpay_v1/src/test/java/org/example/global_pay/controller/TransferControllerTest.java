@@ -48,35 +48,10 @@ public class TransferControllerTest {
                 .idempotencyKey(UUID.randomUUID())
                 .build();
 
-        when(transferService.transfer(any(TransferRequest.class))).thenReturn(false);
-
         mockMvc.perform(post("/api/v1/transfer")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
-                .andExpect(header().string("X-Idempotency-Hit", "false"))
-                .andExpect(content().string("Transfer successful"));
-
-        verify(transferService).transfer(request);
-    }
-
-    @Test
-    @DisplayName("Should return 200 OK with idempotency hit header for replay")
-    void shouldReturn200WithIdempotencyHitHeaderForReplay() throws Exception {
-        TransferRequest request = TransferRequest.builder()
-                .fromId(UUID.randomUUID())
-                .toId(UUID.randomUUID())
-                .amount(new BigDecimal("100.00"))
-                .idempotencyKey(UUID.randomUUID())
-                .build();
-
-        when(transferService.transfer(any(TransferRequest.class))).thenReturn(true);
-
-        mockMvc.perform(post("/api/v1/transfer")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(request)))
-                .andExpect(status().isOk())
-                .andExpect(header().string("X-Idempotency-Hit", "true"))
                 .andExpect(content().string("Transfer successful"));
 
         verify(transferService).transfer(request);

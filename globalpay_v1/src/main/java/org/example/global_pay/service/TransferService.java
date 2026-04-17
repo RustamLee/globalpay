@@ -1,19 +1,12 @@
 package org.example.global_pay.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.example.global_pay.domain.Account;
-import org.example.global_pay.domain.OutboxEvent;
 import org.example.global_pay.domain.Transaction;
 import org.example.global_pay.domain.TransactionStatus;
-import org.example.global_pay.dto.PaymentProviderRequest;
 import org.example.global_pay.dto.TransferRequest;
 import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.GlobalPayException;
-import org.example.global_pay.repository.AccountRepository;
-import org.example.global_pay.repository.OutboxEventRepository;
 import org.example.global_pay.repository.TransactionRepository;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -35,12 +28,8 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class TransferService {
     private final TransactionRepository transactionRepository;
-    private final AccountRepository accountRepository;
     private final StringRedisTemplate redisTemplate;
     private final MoneyTransferProcessor processor;
-    private final OutboxEventRepository outboxEventRepository;
-    private final ObjectMapper objectMapper;
-
 
     private static final String IDEMPOTENCY_PREFIX = "transfer_idempotency:";
     private static final Duration IDEMPOTENCY_TTL = Duration.ofHours(24);
@@ -50,14 +39,14 @@ public class TransferService {
             backoff = @Backoff(delay = 100, multiplier = 2)
     )
     @Transactional(noRollbackFor = GlobalPayException.class)
-    public boolean transfer(TransferRequest request) {
+    public void transfer(TransferRequest request) {
         String key = IDEMPOTENCY_PREFIX + request.getIdempotencyKey();
 
         // Redis is only a fast-path cache for completed idempotent requests.
         String cachedState = redisTemplate.opsForValue().get(key);
         if ("COMPLETED".equals(cachedState)) {
             log.info("Idempotent replay from cache for SUCCESS key: {}", request.getIdempotencyKey());
-            return true;
+            return;
         }
 
         transactionRepository.insertPendingIfAbsent(
@@ -79,7 +68,7 @@ public class TransferService {
         if (tx.getStatus() == TransactionStatus.SUCCESS) {
             cacheCompletedAfterCommit(key);
             log.info("Idempotent replay for SUCCESSFUL key: {}", request.getIdempotencyKey());
-            return true;
+            return;
         }
 
         if (tx.getStatus() == TransactionStatus.FAILED) {
@@ -88,9 +77,7 @@ public class TransferService {
 
         try {
             processor.executeWithLock(request, tx);
-            createOutboxEvent(tx, request);
             cacheCompletedAfterCommit(key);
-            return false;
         } catch (Exception e) {
             if (e instanceof GlobalPayException
                     && tx.getStatus() != TransactionStatus.SUCCESS
@@ -122,32 +109,5 @@ public class TransferService {
 
     public Page<Transaction> getTransactions(UUID accountId, Pageable pageable) {
         return transactionRepository.findAllByFromAccountIdOrToAccountIdOrderByCreatedAtDesc(accountId, accountId, pageable);
-    }
-
-    private void createOutboxEvent(Transaction tx, TransferRequest request) {
-        try {
-            Account toAccount = accountRepository.findById(request.getToId())
-                    .orElseThrow(() -> new IllegalStateException("Account not found: " + request.getToId()));
-            PaymentProviderRequest gatewayReq = new PaymentProviderRequest(
-                    tx.getId().toString(),
-                    request.getAmount(),
-                    toAccount.getCurrency(),
-                    request.getToId().toString(),
-                    "Transfer from " + request.getFromId()
-            );
-
-            String payload = objectMapper.writeValueAsString(gatewayReq);
-
-            OutboxEvent event = new OutboxEvent();
-            event.setAggregateId(tx.getId().toString());
-            event.setType("EXTERNAL_PAYMENT_SEND");
-            event.setPayload(payload);
-
-            outboxEventRepository.save(event);
-            log.info("Outbox event created for transaction: {}", tx.getId());
-
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize outbox payload", e);
-        }
     }
 }

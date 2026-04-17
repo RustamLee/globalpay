@@ -27,7 +27,9 @@ import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -102,7 +104,9 @@ public class TransferServiceTest {
                 .thenReturn(1);
         when(transactionRepository.findByIdempotencyKeyForUpdate(idempotencyKey)).thenReturn(Optional.of(pendingTx));
 
-        transferService.transfer(request);
+        boolean idempotencyHit = transferService.transfer(request);
+
+        assertFalse(idempotencyHit);
 
         verify(transactionRepository).insertPendingIfAbsent(any(), eq(fromId), eq(toId), any(), any(), any(), eq("PENDING"), eq(idempotencyKey));
         verify(moneyTransferProcessor).executeWithLock(request, pendingTx);
@@ -192,7 +196,9 @@ public class TransferServiceTest {
         when(valueOps.get(redisKey)).thenReturn("COMPLETED");
 
         // WHEN
-        transferService.transfer(request);
+        boolean idempotencyHit = transferService.transfer(request);
+
+        assertTrue(idempotencyHit);
 
         // THEN
         verify(transactionRepository, never()).insertPendingIfAbsent(any(), any(), any(), any(), any(), any(), any(), any());

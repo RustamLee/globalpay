@@ -31,9 +31,6 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--web.enable-remote-write-receiver'
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     ports:
@@ -43,8 +40,6 @@ services:
     image: grafana/grafana:latest
     ports:
       - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     depends_on:
@@ -52,4 +47,3 @@ services:
 
 volumes:
   pgdata:
-  grafana-data:

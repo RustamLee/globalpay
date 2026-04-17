@@ -1,180 +1,212 @@
 # GlobalPay
+
 **GlobalPay** is a production-minded payment engine built with **Java 21**, **Spring Boot 3.4**, **PostgreSQL**, and **Redis**.
-The project focuses on the hard parts of money movement systems:
-- **concurrency safety**
-- **idempotent request handling**
-- **transaction consistency**
-- **failure-aware state management**
-- **real integration testing with containers**
-This repository is designed as a strong **backend portfolio project / MVP payment core** rather than a simple CRUD demo.
+
+This repository focuses on payment-system concerns that are usually skipped in CRUD demos:
+
+- concurrency safety for balance integrity
+- idempotent request handling under retries
+- transactional consistency and explicit state transitions
+- reliable async side effects with **Transactional Outbox**
+- observability and load validation with Prometheus/Grafana + k6
+
 ---
+
 ## Why this project is interesting
-Payment systems are not difficult because of REST controllers — they are difficult because of **race conditions**, **duplicate requests**, **partial failures**, and **state consistency**.
-GlobalPay addresses those concerns with a pragmatic architecture:
-- **Pessimistic locking** on accounts to protect balance updates
-- **Two-layer idempotency** using Redis + database state
-- **Transactional status flow** with `PENDING -> PROCESSING -> SUCCESS | FAILED`
-- **`afterCommit` cache synchronization** so side effects happen only after a successful database commit
-- **Retry support** for optimistic locking conflicts
-- **Testcontainers-based integration tests** for realistic verification
+
+Moving money is not only about writing two rows in a database.
+Real complexity appears when locking, retries, idempotency, and external integrations interact under load.
+
+GlobalPay v2 addresses this with practical reliability patterns:
+
+- pessimistic row locking on accounts
+- two-layer idempotency (DB state + Redis fast-path replay)
+- transaction lifecycle (`PENDING -> PROCESSING -> SUCCESS | FAILED`)
+- `afterCommit` Redis synchronization to avoid cache/DB drift
+- **Transactional Outbox** for external side effects
+- retry/backoff + **Circuit Breaker** around gateway communication
+- integration tests with Testcontainers (including outbox behavior)
+
 ---
-## Core capabilities
-### Money transfer API
-The current HTTP API exposes:
-- `POST /api/v1/transfer` — execute a transfer
-- `GET /api/v1/transfer/accounts/{accountId}/transactions` — get paginated transaction history
-### Reliability patterns implemented
-- **Pessimistic DB locking** via `SELECT ... FOR UPDATE`
-- **Unique idempotency key protection** at the database layer
-- **Fast-path replay handling** via Redis cache
-- **Failure persistence** for business exceptions
-- **Separation of orchestration and business logic** between `TransferService` and `MoneyTransferProcessor`
-- **Centralized exception mapping** with meaningful HTTP responses
-- **Request correlation** through MDC / request IDs
-- **Metrics exposure** through Spring Boot Actuator + Prometheus
+
+## Core API
+
+- `POST /api/v1/transfer` - execute a transfer
+- `GET /api/v1/transfer/accounts/{accountId}/transactions` - paginated account history
+
+### Transfer response behavior
+
+Successful transfer request returns HTTP `200` and:
+
+- body: `Transfer successful`
+- header: `X-Idempotency-Hit: false` for a fresh processing
+- header: `X-Idempotency-Hit: true` for idempotent replay of an already-successful request
+
 ---
-## Architecture at a glance
-### 1. Happy Path — Successful Money Transfer
+
+## Reliability patterns implemented
+
+- **Pessimistic DB locking** (`SELECT ... FOR UPDATE`) for account balance safety
+- **Lock timeout hint** on account locks (`jakarta.persistence.lock.timeout`)
+- **Idempotency state machine** in `transactions` + Redis completion cache
+- **Transactional Outbox** (`outbox_events`) for durable external delivery
+- **Outbox retry policy** with capped attempts and delayed retries
+- **Circuit Breaker** (`paymentGatewayCB`, Resilience4j) for gateway protection
+- **Centralized exception mapping** with meaningful HTTP statuses
+- **Actuator + Prometheus metrics**, including outbox queue size
+- **k6 load tests** for stress, hot contention, and idempotency collisions
+
+---
+
+## Architecture at a glance (v2)
+
+### 1) Happy Path - Transfer + Outbox
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant User as Client (Postman/UI)
     participant API as TransferController
     participant Service as TransferService
-    participant Repo as AccountRepository
-    participant TransRepo as TransactionRepository
+    participant Redis as Redis
+    participant TxRepo as TransactionRepository
+    participant Processor as MoneyTransferProcessor
+    participant AccRepo as AccountRepository
+    participant OutboxRepo as OutboxEventRepository
+    participant Worker as OutboxWorker
+    participant Gateway as PaymentGateway
 
     User->>API: POST /api/v1/transfer (TransferRequest)
-    API->>Service: transfer(transferRequest)
-    activate Service
-    Service->>Repo: findById(fromAccountId)
-    Repo-->>Service: fromAccount
-    Service->>Repo: findById(toAccountId)
-    Repo-->>Service: toAccount
-    Note over Service: Validate balance & account status
-    Service->>Repo: save(fromAccount)
-    Service->>Repo: save(toAccount)
-    Service->>TransRepo: save(transaction)
-    Service-->>API: TransferResponse (Success)
-    deactivate Service
-    API-->>User: 200 OK (Transfer Details)
-```
-
-### 2. Business Errors — Transaction Failure Scenarios
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User as Client (Postman/UI)
-    participant API as TransferController
-    participant Service as TransferService
-    participant Repo as AccountRepository
-    participant TransRepo as TransactionRepository
-
-    Note over User, TransRepo: Validation & Error Handling Flow
-
-    User->>API: POST /api/v1/transfer (Idempotency-Key)
-    API->>Service: transfer(transferRequest)
-    activate Service
-
-    alt Duplicate request
-        Service-->>API: throw DuplicateRequestException
-        API-->>User: 409 Conflict (Duplicate request)
-    else Self-transfer
-        Service->>TransRepo: save(status: FAILED, reason: "SELF_TRANSFER")
-        Service-->>API: throw SelfTransferException
-        API-->>User: 400 Bad Request (Self-transfer)
-    else Account not found
-        Service->>Repo: findById(accountId)
-        Repo-->>Service: null
-        Service->>TransRepo: save(status: FAILED, reason: "ACCOUNT_NOT_FOUND")
-        Service-->>API: throw AccountNotFoundException
-        API-->>User: 404 Not Found (Account not found)
-    else Currency mismatch
-        Service->>Repo: findById(from/to)
-        Repo-->>Service: fromAccount, toAccount
-        Service->>TransRepo: save(status: FAILED, reason: "CURRENCY_MISMATCH")
-        Service-->>API: throw CurrencyMismatchException
-        API-->>User: 400 Bad Request (Currency mismatch)
-    else Insufficient funds
-        Service->>Repo: findById(from)
-        Repo-->>Service: fromAccount
-        Service->>TransRepo: save(status: FAILED, reason: "INSUFFICIENT_FUNDS")
-        Service-->>API: throw InsufficientFundsException
-        API-->>User: 400 Bad Request (Insufficient funds)
-    end
-
-    deactivate Service
-```
-
-### 3. Idempotency Error — Duplicate Request Handling
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User as Client (Postman/UI)
-    participant API as TransferController
-    participant Service as TransferService
-    participant Redis as RedisCache
-    participant TransRepo as TransactionRepository
-
-    User->>API: POST /api/v1/transfer (Header: Idempotency-Key)
     API->>Service: transfer(request)
     activate Service
 
-    Service->>Redis: get(idempotencyKey)
-    alt Key exists
-        Service-->>API: throw DuplicateRequestException (409)
-    else Key not found
-        Service->>Redis: set(idempotencyKey, "PROCESSING", TTL: 24h)
-        Note over Service: Perform Validations (Balance, Currency, etc.)
-        Service->>TransRepo: save(Transaction status: SUCCESS)
-        Service-->>API: TransferResponse (200 OK)
-    end
+    Service->>Redis: GET transfer_idempotency:{key}
+    Redis-->>Service: null
+
+    Service->>TxRepo: insertPendingIfAbsent(...)
+    Service->>TxRepo: findByIdempotencyKeyForUpdate(key)
+    TxRepo-->>Service: Transaction(PENDING)
+
+    Service->>Processor: executeWithLock(request, tx)
+    activate Processor
+
+    Processor->>AccRepo: findByIdForUpdate(fromId)
+    AccRepo-->>Processor: fromAccount
+    Processor->>AccRepo: findByIdForUpdate(toId)
+    AccRepo-->>Processor: toAccount
+
+    Note over Processor: Validate business rules\n(balance, currency, self-transfer)
+
+    Processor->>AccRepo: save(fromAccount)
+    Processor->>AccRepo: save(toAccount)
+    Processor->>TxRepo: save(tx = SUCCESS)
+    Processor-->>Service: transfer persisted
+    deactivate Processor
+
+    Service->>AccRepo: findById(toId)
+    AccRepo-->>Service: recipient account
+    Service->>OutboxRepo: save(OutboxEvent = PENDING)
+
+    Note over Service: Register afterCommit callback\nfor Redis completion marker
+
+    Service-->>API: idempotencyHit = false
     deactivate Service
-    API-->>User: Result
+
+    API-->>User: 200 OK + X-Idempotency-Hit:false
+
+    Note over Service,Redis: After DB commit
+    Service->>Redis: SET transfer_idempotency:{key} = COMPLETED
+
+    Note over Worker,Gateway: Asynchronous side-effect processing
+
+    Worker->>OutboxRepo: findPendingToProcess(now)
+    OutboxRepo-->>Worker: pending outbox events
+    Worker->>Gateway: process(payment request)
+    Gateway-->>Worker: GatewayResponse(SUCCESS)
+    Worker->>OutboxRepo: save(event = PROCESSED)
 ```
 
-### 4. ER Diagram (Database Schema)
+### 2) Outbox Retry / Failure Handling
+
 ```mermaid
-erDiagram
-    USER {
-        UUID id PK
-        STRING email
-    }
-    ACCOUNT {
-        UUID id PK
-        UUID user_id FK
-        DECIMAL balance
-        STRING currency
-        LONG version
-    }
-    TRANSACTION {
-        UUID id PK
-        UUID from_account_id FK
-        UUID to_account_id FK
-        DECIMAL amount
-        STRING status
-        STRING idempotency_key
-        STRING failure_reason
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
-    }
+sequenceDiagram
+    autonumber
+    participant Worker as OutboxWorker
+    participant OutboxRepo as OutboxEventRepository
+    participant Gateway as PaymentGateway
+    participant CB as CircuitBreaker
 
-    USER ||--o{ ACCOUNT : "owns"
-    ACCOUNT ||--o{ TRANSACTION : "source for"
-    ACCOUNT ||--o{ TRANSACTION : "destination for"
+    Worker->>OutboxRepo: findPendingToProcess(now)
+    OutboxRepo-->>Worker: event(PENDING, attempts=n)
+
+    alt Circuit breaker OPEN
+        Worker->>CB: check state
+        CB-->>Worker: OPEN
+        Worker->>OutboxRepo: save(nextRetryAt = now + 10s)
+    else Gateway exception
+        Worker->>Gateway: process(event payload)
+        Gateway-->>Worker: Exception
+        Worker->>OutboxRepo: attempts++ ; lastError=message
+        alt attempts >= 5
+            Worker->>OutboxRepo: save(status = FAILED)
+        else attempts < 5
+            Worker->>OutboxRepo: save(nextRetryAt = backoff)
+        end
+    else Gateway success
+        Worker->>Gateway: process(event payload)
+        Gateway-->>Worker: SUCCESS
+        Worker->>OutboxRepo: save(status = PROCESSED, lastError=null)
+    end
 ```
-### Transfer flow summary
-1. Check Redis for a completed idempotency key
-2. Insert a `PENDING` transaction row if it does not exist
-3. Lock the transaction row by idempotency key
-4. Move state to `PROCESSING`
-5. Lock both accounts with pessimistic write locks
-6. Validate business rules
-7. Update balances and persist `SUCCESS`
-8. Cache completion in Redis **after transaction commit**
+
 ---
+
+## Transfer flow summary (synchronous path)
+
+1. Check Redis for `transfer_idempotency:{key}`
+2. Insert `PENDING` transaction row if absent
+3. Lock transaction row by idempotency key
+4. Move transaction to `PROCESSING`
+5. Lock both accounts with pessimistic write locks
+6. Validate business rules and update balances
+7. Persist transaction as `SUCCESS`
+8. Create `outbox_events` record (`PENDING`)
+9. On commit, cache Redis marker `COMPLETED`
+10. Return `200 OK` with `X-Idempotency-Hit`
+
+---
+
+## Data model
+
+### Main tables
+
+- `users` - account owners
+- `accounts` - balances, currency, optimistic-lock version
+- `transactions` - transfer lifecycle + idempotency metadata
+- `outbox_events` - durable async delivery queue for external gateway calls
+
+### Outbox status lifecycle
+
+- `PENDING` - waiting for processing
+- `PROCESSED` - delivered successfully
+- `FAILED` - exhausted retry limit
+
+### Flyway migrations
+
+Located in `src/main/resources/db/migration/`:
+
+- `V1__init_schema.sql`
+- `V2__add_idempotency_key_to_transactions.sql`
+- `V3__add_updated_at_and_failure_reason_to_transactions.sql`
+- `V4__create_outbox_events_table.sql`
+- `V5__add_error_column_to_outbox.sql`
+
+---
+
 ## Tech stack
+
 ### Backend
+
 - Java 21
 - Spring Boot 3.4
 - Spring Web
@@ -184,111 +216,96 @@ erDiagram
 - Spring Data Redis
 - Spring Boot Actuator
 - SpringDoc OpenAPI
-### Data & infrastructure
+- Resilience4j Circuit Breaker
+
+### Data & Infrastructure
+
 - PostgreSQL
 - Redis
 - Flyway
 - Docker Compose
 - Prometheus
 - Grafana
+
 ### Testing
+
 - JUnit 5
 - Mockito
-- Testcontainers
+- Testcontainers (PostgreSQL + Redis + MockServer)
 - Maven Surefire / Failsafe
 - JaCoCo
+- k6 (load and contention scenarios)
+
 ---
+
 ## Project structure
+
 ```text
-GlobalPay/
-├── src/main/java/org/example/global_pay/
-│   ├── controller/
-│   ├── domain/
-│   ├── dto/
-│   ├── exception/
-│   ├── filter/
-│   ├── repository/
-│   └── service/
-├── src/main/resources/
-│   ├── application.yml
-│   └── db/migration/
-├── src/test/java/org/example/global_pay/
-│   ├── controller/
-│   ├── domain/
-│   └── service/
-├── docker-compose.yml
-├── pom.xml
-└── README.md
+globalpay/
+|-- src/main/java/org/example/global_pay/
+|   |-- config/
+|   |-- controller/
+|   |-- domain/
+|   |-- dto/
+|   |-- exception/
+|   |-- filter/
+|   |-- repository/
+|   `-- service/
+|       |-- gateway/
+|       `-- outbox/
+|-- src/main/resources/
+|   |-- application.yml
+|   `-- db/migration/
+|-- src/test/java/org/example/global_pay/
+|   |-- controller/
+|   |-- domain/
+|   |-- service/
+|   `-- service/outbox/
+|-- load-tests/
+|-- docker-compose.yml
+|-- pom.xml
+`-- README.md
 ```
+
 ---
+
 ## Local setup
+
 ### Prerequisites
-Make sure you have:
-- **Java 21**
-- **Maven 3.9+**
-- **Docker** (required for local infrastructure and integration tests)
-### 1) Start local infrastructure
-This project includes PostgreSQL, Redis, Prometheus, and Grafana in `docker-compose.yml`.
+
+- Java 21
+- Maven 3.9+
+- Docker
+
+### 1) Start infrastructure
+
 ```bash
-cd GlobalPay
 docker compose up -d
 ```
-Services defined in the project:
+
+Default ports from `docker-compose.yml`:
+
 - PostgreSQL: `localhost:5432`
 - pgAdmin: `localhost:5050`
 - Redis: `localhost:6379`
 - Prometheus: `localhost:9090`
 - Grafana: `localhost:3000`
-### 2) Run the application
+
+### 2) Run application
+
 ```bash
-cd GlobalPay
 mvn spring-boot:run
 ```
-The application is configured in `src/main/resources/application.yml` to connect to:
-- PostgreSQL: `jdbc:postgresql://localhost:5432/globalpay`
-- Redis: `localhost:6379`
-Flyway migrations run automatically on startup.
+
 ### 3) Open API docs
-If the app is running locally, SpringDoc should expose:
+
 - Swagger UI: `http://localhost:8080/swagger-ui/index.html`
 - OpenAPI JSON: `http://localhost:8080/v3/api-docs`
+
 ---
-## Creating sample data for manual testing
-The current project focuses on the **transfer engine**, so accounts and users should already exist before calling the transfer endpoint.
-You can create sample records directly in PostgreSQL.
-### Option A — open `psql` inside the container
-```bash
-docker exec -it globalpay-db psql -U devuser -d globalpay
-```
-Then run:
-```sql
-INSERT INTO users (id, email)
-VALUES
-  ('11111111-1111-1111-1111-111111111111', 'alice@globalpay.dev'),
-  ('22222222-2222-2222-2222-222222222222', 'bob@globalpay.dev');
-INSERT INTO accounts (id, user_id, balance, currency)
-VALUES
-  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '11111111-1111-1111-1111-111111111111', 1000.00, 'USD'),
-  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 250.00, 'USD');
-```
-### Option B — one-shot SQL command
-```bash
-docker exec -i globalpay-db psql -U devuser -d globalpay <<'SQL'
-INSERT INTO users (id, email)
-VALUES
-  ('11111111-1111-1111-1111-111111111111', 'alice@globalpay.dev'),
-  ('22222222-2222-2222-2222-222222222222', 'bob@globalpay.dev')
-ON CONFLICT (email) DO NOTHING;
-INSERT INTO accounts (id, user_id, balance, currency)
-VALUES
-  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '11111111-1111-1111-1111-111111111111', 1000.00, 'USD'),
-  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 250.00, 'USD')
-ON CONFLICT (id) DO NOTHING;
-SQL
-```
----
-## API examples
-### Execute a transfer
+
+## Quick API example
+
 ```bash
 curl -X POST 'http://localhost:8080/api/v1/transfer' \
   -H 'Content-Type: application/json' \
@@ -297,125 +314,104 @@ curl -X POST 'http://localhost:8080/api/v1/transfer' \
     "toId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     "amount": 100.00,
     "idempotencyKey": "33333333-3333-3333-3333-333333333333"
-  }'
+  }' -i
 ```
-Expected success response:
-```text
-Transfer successful
-```
-### Fetch transaction history
-```bash
-curl 'http://localhost:8080/api/v1/transfer/accounts/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/transactions?page=0&size=10&sort=createdAt,desc'
-```
-### Example business error scenarios
-The API is designed to return meaningful responses for situations such as:
-- insufficient funds
-- self-transfer attempts
-- currency mismatch
-- duplicate idempotency keys
-- account not found
-- lock / concurrency conflicts
+
+Look for `X-Idempotency-Hit` in response headers.
+
 ---
-## Transfer request contract
-`POST /api/v1/transfer`
-```json
-{
-  "fromId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-  "toId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-  "amount": 100.00,
-  "idempotencyKey": "33333333-3333-3333-3333-333333333333"
-}
-```
-### Validation rules
-- `fromId` — required
-- `toId` — required
-- `amount` — required, positive, max `100000.00`, up to 2 decimal places
-- `idempotencyKey` — required
----
-## Database model
-### `users`
-Stores account owners.
-### `accounts`
-Stores balance, currency, and optimistic lock version.
-### `transactions`
-Stores transfer state and idempotency metadata.
-Important transaction fields:
-- `status`
-- `idempotency_key`
-- `failure_reason`
-- `created_at`
-- `updated_at`
-Flyway migrations live in `src/main/resources/db/migration/`.
----
+
 ## Testing
-### Run unit tests
+
+### Unit tests
+
 ```bash
-cd GlobalPay
 mvn test
 ```
-### Run the full verification pipeline
-This runs unit tests, integration tests, and JaCoCo reporting.
+
+### Full pipeline (unit + integration + coverage)
+
 ```bash
-cd GlobalPay
 mvn verify
 ```
-### Notes about the test strategy
-The project includes:
-- **unit tests** for domain logic, controller behavior, and service orchestration
-- **integration tests** with **Testcontainers** for PostgreSQL and Redis
-- **concurrency-oriented scenarios** to verify idempotency and balance consistency
-Integration tests require Docker because Testcontainers starts real infrastructure.
----
-### ✅ Code Coverage
-The project uses **JaCoCo** for test coverage analysis. 
-Current total instruction coverage is **78%**, with **100%** coverage for critical API Controllers.
 
-![JaCoCo Coverage Report](./docs/jacoco-coverage.png)
+Integration tests use Testcontainers and include outbox reliability scenarios (see `OutboxWorkerIT`).
+
 ---
+
+## Load testing
+
+Load scripts are in `load-tests/`.
+
+### Prepare test data
+
+```bash
+psql -h localhost -U devuser -d globalpay -f load-tests/init.sql
+```
+
+### 1) Distributed transfer stress
+
+```bash
+ACCOUNT_IDS=$(PGPASSWORD=devpassword psql -h localhost -U devuser -d globalpay -Atc "SELECT string_agg(id::text, ',' ORDER BY id) FROM accounts WHERE id::text LIKE '40000000-0000-0000-0000-%';")
+K6_PROMETHEUS_RW_TREND_STATS="p(95),p(99)" k6 run --out experimental-prometheus-rw -e ACCOUNT_IDS="$ACCOUNT_IDS" load-tests/transfer-stress.js
+```
+
+### 2) Hot-account contention
+
+```bash
+K6_PROMETHEUS_RW_TREND_STATS="p(95),p(99)" k6 run --out experimental-prometheus-rw load-tests/transfer-hot-contention.js
+```
+
+### 3) Idempotency-key collisions
+
+```bash
+K6_PROMETHEUS_RW_TREND_STATS="p(95),p(99)" k6 run --out experimental-prometheus-rw \
+  -e ACCOUNT_IDS="40000000-0000-0000-0000-000000000001,40000000-0000-0000-0000-000000000002,40000000-0000-0000-0000-000000000003,40000000-0000-0000-0000-000000000004,40000000-0000-0000-0000-000000000005,40000000-0000-0000-0000-000000000006" \
+  -e HOT_KEY_POOL_SIZE=6 \
+  -e HOT_KEY_RATIO=0.95 \
+  -e SLEEP_SECONDS=0.10 \
+  -e STAGE_1_TARGET=15 \
+  -e STAGE_2_TARGET=30 \
+  -e STAGE_3_TARGET=50 \
+  load-tests/transfer-idempotency-collision.js
+```
+
+---
+
 ## Observability
-### Health and metrics
-Spring Boot Actuator exposes:
+
+Actuator endpoints:
+
 - `GET /actuator/health`
+- `GET /actuator/info`
+- `GET /actuator/metrics`
 - `GET /actuator/prometheus`
-### Prometheus
-If you start the provided compose stack:
-- Prometheus: `http://localhost:9090`
-### Grafana
-If you start the provided compose stack:
-- Grafana: `http://localhost:3000`
-- Default admin password in compose: `admin`
+
+Project metrics include standard JVM/HTTP metrics and outbox queue gauge (`payment.outbox.queue.size`).
+
 ---
-## Engineering decisions worth highlighting
-### 1. Pessimistic locking for balance safety
-`AccountRepository` uses pessimistic write locks so concurrent transfers cannot corrupt balances.
-### 2. Two-layer idempotency
-GlobalPay uses:
-- Redis for a fast replay response
-- database transaction state for atomic correctness
-### 3. State-driven transaction lifecycle
-Transactions move through explicit states (`PENDING`, `PROCESSING`, `SUCCESS`, `FAILED`), making outcomes auditable and easier to reason about.
-### 4. Failure-aware transaction handling
-Business exceptions are preserved in transaction state instead of disappearing behind a rollback.
-### 5. Side effects after commit
-Redis is updated only after a successful commit, preventing cache/database drift.
+
+## Engineering highlights
+
+1. **Consistency-first transfer core** with lock-protected balance updates
+2. **Idempotency visible at API level** (`X-Idempotency-Hit`)
+3. **Transactional Outbox** decouples core transaction from external side effects
+4. **Resilience controls** (retry + Circuit Breaker + bounded outbox attempts)
+5. **Pressure-oriented validation** through integration and k6 scenarios
+
 ---
-## Current limitations / roadmap
-This repository is already strong as an MVP payment core, but the next logical improvements are:
-- ordered lock acquisition to further reduce circular deadlock risk
-- audit log persistence
-- outbox pattern for downstream events / integrations
-- rate limiting at the API edge
-- richer account/user management APIs
-- broader multi-currency support
+
+## Current limitations / next steps
+
+- improve lock ordering strategy to further reduce deadlock risk
+- add stronger delivery guarantees for parallel outbox workers (e.g., row claim strategy)
+- add audit/event history views for operations
+- expand account/user APIs and auth boundary
+- extend multi-currency conversion rules
+
 ---
-## Portfolio / interview angle
-GlobalPay is a good project to discuss in interviews because it demonstrates:
-- practical payment system thinking
-- transactional consistency under concurrency
-- API design for real-world failure modes
-- Spring Boot architecture beyond CRUD
-- realistic testing with containers instead of pure mocks
----
+
 ## License
-No license file is currently present in the root project.
-If you plan to publish this repository publicly, adding a license (for example MIT or Apache-2.0) would be a good next step.
+
+No license file is currently present in the repository root.
+If you plan to publish publicly, consider adding one (for example MIT or Apache-2.0).

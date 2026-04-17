@@ -12,10 +12,14 @@ spring:
     username: devuser
     password: devpassword
     driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 40
+      minimum-idle: 10
+      idle-timeout: 30000
 
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
-    show-sql: true
+    show-sql: false
     hibernate:
       ddl-auto: validate
     properties:
@@ -30,7 +34,7 @@ spring:
 logging:
   level:
     root: INFO
-    org.example.global_pay: DEBUG
+    org.example.global_pay: INFO
   pattern:
     console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%X{requestId}] - %msg%n"
 
