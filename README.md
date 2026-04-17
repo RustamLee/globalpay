@@ -139,20 +139,26 @@ sequenceDiagram
     OutboxRepo-->>Worker: event(PENDING, attempts=n)
 
     alt Circuit breaker is OPEN
-        Note over Worker: CallNotPermittedException caught
+        Note over Worker: CallNotPermittedException
         Worker->>OutboxRepo: save(nextRetryAt = now + 10s)
-    else Gateway call succeeds
+
+    else Circuit breaker CLOSED
         Worker->>Gateway: process(event payload)
-        Gateway-->>Worker: GatewayResponse(SUCCESS)
-        Worker->>OutboxRepo: save(status = PROCESSED, lastError = null)
-    else Gateway call fails, attempts < 5
-        Worker->>Gateway: process(event payload)
-        Gateway-->>Worker: Exception
-        Worker->>OutboxRepo: save(attempts++, lastError, nextRetryAt = backoff)
-    else Gateway call fails, attempts >= 5
-        Worker->>Gateway: process(event payload)
-        Gateway-->>Worker: Exception
-        Worker->>OutboxRepo: save(status = FAILED, lastError = message)
+
+        alt success
+            Gateway-->>Worker: SUCCESS
+            Worker->>OutboxRepo: save(status = PROCESSED)
+
+        else failure
+            Gateway-->>Worker: Exception
+            Worker->>OutboxRepo: attempts++, lastError
+
+            alt attempts >= 5
+                Worker->>OutboxRepo: save(status = FAILED)
+            else attempts < 5
+                Worker->>OutboxRepo: save(nextRetryAt = backoff)
+            end
+        end
     end
 ```
 
