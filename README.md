@@ -134,25 +134,28 @@ sequenceDiagram
     participant Worker as OutboxWorker
     participant OutboxRepo as OutboxEventRepository
     participant Gateway as PaymentGateway
+    participant CB as CircuitBreaker
 
     Worker->>OutboxRepo: findPendingToProcess(now)
     OutboxRepo-->>Worker: event(PENDING, attempts=n)
 
-    alt Circuit breaker is OPEN
-        Note over Worker: CallNotPermittedException caught
+    alt Circuit breaker OPEN
+        Worker->>CB: check state
+        CB-->>Worker: OPEN
         Worker->>OutboxRepo: save(nextRetryAt = now + 10s)
-    else Gateway call succeeds
-        Worker->>Gateway: process(event payload)
-        Gateway-->>Worker: GatewayResponse(SUCCESS)
-        Worker->>OutboxRepo: save(status = PROCESSED, lastError = null)
-    else Gateway call fails, attempts < 5
+    else Gateway exception
         Worker->>Gateway: process(event payload)
         Gateway-->>Worker: Exception
-        Worker->>OutboxRepo: save(attempts++, lastError, nextRetryAt = backoff)
-    else Gateway call fails, attempts >= 5
+        Worker->>OutboxRepo: attempts++ ; lastError=message
+        alt attempts >= 5
+            Worker->>OutboxRepo: save(status = FAILED)
+        else attempts < 5
+            Worker->>OutboxRepo: save(nextRetryAt = backoff)
+        end
+    else Gateway success
         Worker->>Gateway: process(event payload)
-        Gateway-->>Worker: Exception
-        Worker->>OutboxRepo: save(status = FAILED, lastError = message)
+        Gateway-->>Worker: SUCCESS
+        Worker->>OutboxRepo: save(status = PROCESSED, lastError=null)
     end
 ```
 
