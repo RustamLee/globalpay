@@ -1,7 +1,5 @@
 package org.example.global_pay.service;
 
-
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.global_pay.domain.Account;
@@ -13,11 +11,8 @@ import org.example.global_pay.exception.CurrencyMismatchException;
 import org.example.global_pay.exception.DuplicateRequestException;
 import org.example.global_pay.exception.SelfTransferException;
 import org.example.global_pay.repository.AccountRepository;
-import org.example.global_pay.repository.OutboxEventRepository;
 import org.example.global_pay.repository.TransactionRepository;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Propagation;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -31,6 +26,7 @@ public class MoneyTransferProcessor {
     private final TransactionRepository transactionRepository;
 
     public void execute(TransferRequest request, Transaction transaction) {
+
         UUID fromId = request.getFromId();
         UUID toId = request.getToId();
         BigDecimal amount = request.getAmount();
@@ -39,10 +35,16 @@ public class MoneyTransferProcessor {
             throw new SelfTransferException("Cannot transfer to the same account");
         }
 
-        Account from = accountRepository.findByIdForUpdate(fromId)
-                .orElseThrow(() -> new AccountNotFoundException("Account not found: " + fromId));
-        Account to = accountRepository.findByIdForUpdate(toId)
-                .orElseThrow(() -> new AccountNotFoundException("Account not found: " + toId));
+        UUID firstId = fromId.compareTo(toId) < 0 ? fromId : toId;
+        UUID secondId = fromId.compareTo(toId) < 0 ? toId : fromId;
+
+        Account first = accountRepository.findByIdForUpdate(firstId)
+                .orElseThrow(() -> new AccountNotFoundException("Account not found: " + firstId));
+        Account second = accountRepository.findByIdForUpdate(secondId)
+                .orElseThrow(() -> new AccountNotFoundException("Account not found: " + secondId));
+
+        Account from = fromId.equals(firstId) ? first : second;
+        Account to = toId.equals(firstId) ? first : second;
 
         if (!from.getCurrency().equals(to.getCurrency())) {
             throw new CurrencyMismatchException("Currency mismatch");

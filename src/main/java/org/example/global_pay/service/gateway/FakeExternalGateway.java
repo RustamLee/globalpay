@@ -35,13 +35,15 @@ public class FakeExternalGateway implements PaymentGateway {
         log.info("Simulating success for event: {}", request.externalTransactionId());
 
         try {
-//            return restTemplate.postForObject(gatewayUrl + "/v1/payments", request, GatewayResponse.class);
+            // for k6
             return new GatewayResponse(
                     request.externalTransactionId(),
                     GatewayStatus.SUCCESS,
                     "FIXED-" + UUID.randomUUID().toString().substring(0, 8)
             );
 
+           // for IT test
+//          return restTemplate.postForObject(gatewayUrl + "/v1/payments", request, GatewayResponse.class);
         } catch (Exception e) {
             log.error("Gateway call failed for tx {}: {}", request.externalTransactionId(), e.getMessage());
             throw new GatewayException("Gateway error: " + e.getMessage());
