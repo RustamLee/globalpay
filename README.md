@@ -141,12 +141,12 @@ sequenceDiagram
 
     alt Circuit breaker OPEN
         Worker->>CB: check state
-        CB-->>Worker: OPEN
+        CB-->>Worker: CallNotPermittedException
         Worker->>OutboxRepo: save(nextRetryAt = now + 10s)
     else Gateway exception
         Worker->>Gateway: process(event payload)
         Gateway-->>Worker: Exception
-        Worker->>OutboxRepo: attempts++ ; lastError=message
+        Note over Worker, OutboxRepo: Increment attempts & save last error
         alt attempts >= 5
             Worker->>OutboxRepo: save(status = FAILED)
         else attempts < 5
@@ -157,6 +157,7 @@ sequenceDiagram
         Gateway-->>Worker: SUCCESS
         Worker->>OutboxRepo: save(status = PROCESSED, lastError=null)
     end
+
 ```
 
 ---
